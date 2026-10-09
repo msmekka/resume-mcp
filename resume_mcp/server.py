@@ -1,4 +1,5 @@
 import argparse
+import collections
 import itertools
 import json
 import logging
@@ -68,9 +69,84 @@ def load_index() -> dict:
         return {}
 
 
+
+#--------PDF EXTRACTION QUALITY-------------
+#Apple Pages, and some other PDF producers, embed fonts whose glyphs carry no
+#usable Unicode mapping. Extraction then yields a substitute character where a
+#real one stood, and the substitute differs per glyph and per document:
+#"Pla,orm", "Na>ve", "integra@on", "Innova=on", "producBon", "execuFve",
+#"compaKbility", "soRware" are all the same defect wearing different masks.
+#
+#Inferring that mapping was tried and abandoned. There is no reliable key, and
+#a wrong guess silently rewrites the person's resume -- in testing it turned an
+#email address into "nametiexample.com" and "Na>ve" into "Natfve". A
+#resume is a factual claim someone will be asked about in an interview, so
+#quiet corruption is worse than visible damage.
+#
+#What is done instead is deterministic: repair the ligatures that DO carry a
+#Unicode mapping, prefer a DOCX source over a PDF whenever both exist, and
+#report the rest rather than guessing at it. Measured on this corpus, DOCX
+#extraction of the same document carries roughly a tenth of the artifacts.
+
+LIGATURES = {
+    "\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl",
+    "\ufb03": "ffi", "\ufb04": "ffl", "\ufb05": "ft", "\ufb06": "st",
+}
+
+#lowest index wins when the same document is present in several formats
+SOURCE_PREFERENCE = ['.docx', '.pdf']
+
+#a lowercase letter, then something that cannot sit inside a word, then a
+#lowercase letter. Deliberately excludes punctuation that legitimately appears
+#mid-word, and runs of capitals, so product names like FSxONTAP do not count.
+#also excludes Markdown emphasis, which DOCX conversion legitimately produces
+DAMAGE_RE = re.compile(r"[a-z][^a-z\sA-Z0-9.,;:()/\-'\u2019&*_\[\]]+[a-z]")
+
+
+def normalize_extraction(text: str) -> str:
+    """Expands the ligature characters that carry a real Unicode mapping.
+
+    Lossless and unambiguous: U+FB01 is 'fi' and nothing else. No attempt is
+    made to repair substitute characters, which cannot be resolved reliably.
+    """
+    for bad, good in LIGATURES.items():
+        text = text.replace(bad, good)
+    return text
+
+
+#email addresses contain an "@" between letters and are not damage
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]{2,}(?:\.[\w-]{2,})+")
+
+
+def extraction_damage(text: str) -> int:
+    """Counts unresolvable substitute characters left in extracted text."""
+    cleaned = EMAIL_RE.sub("", normalize_extraction(text))
+    return len(DAMAGE_RE.findall(cleaned))
+
+
+def preferred_source(source_path: Path) -> Path:
+    """The best-quality source available for this document.
+
+    A PDF is skipped when a DOCX of the same name sits beside it, because the
+    DOCX extracts cleanly and the PDF usually does not.
+    """
+    for suffix in SOURCE_PREFERENCE:
+        candidate = source_path.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return source_path
+
+
 def process_file(source_path: Path):
     """Parses PDF/DOCX files into structured Markdown and updates index"""
     if source_path.suffix.lower() not in SUPPORTED_FILE_TYPES:
+        return
+
+    #a cleaner copy of the same document may sit beside this one
+    best = preferred_source(source_path)
+    if best != source_path:
+        logger.info("Skipping %s; %s extracts more cleanly",
+                    source_path.name, best.name)
         return
 
     logger.info("Compiling changes for: %s", source_path.name)
@@ -79,9 +155,9 @@ def process_file(source_path: Path):
         md_filename = f"{source_path.stem}.md"
         md_path = CORPUS_DIR / md_filename
 
-        #save output
+        #save output, repairing ligature damage from PDF extraction
         with open(md_path, "w", encoding="utf-8") as f:
-            f.write(result.text_content)
+            f.write(normalize_extraction(result.text_content))
 
         #update config tracking
         update_config_index(source_path.stem, md_filename)
@@ -195,12 +271,17 @@ def reconcile_corpus():
     clobbering hand-edits made directly to the corpus.
     """
     stale = []
+    seen = set()
     for file in sorted(SOURCE_DIR.iterdir()):
         if not file.is_file() or file.suffix.lower() not in SUPPORTED_FILE_TYPES:
             continue
-        md_path = CORPUS_DIR / f"{file.stem}.md"
-        if not md_path.exists() or file.stat().st_mtime > md_path.stat().st_mtime:
-            stale.append(file)
+        if file.stem in seen:
+            continue
+        best = preferred_source(file)
+        seen.add(file.stem)
+        md_path = CORPUS_DIR / f"{best.stem}.md"
+        if not md_path.exists() or best.stat().st_mtime > md_path.stat().st_mtime:
+            stale.append(best)
 
     if not stale:
         logger.info("Corpus is already up to date with %s", SOURCE_DIR.name)
@@ -507,6 +588,58 @@ def cmd_promote(args) -> int:
 
 
 #--------INITIALIZATION CONTROLLER-------------
+def cmd_normalize(args) -> int:
+    """Repairs ligature damage in corpus files already on disk.
+
+    Reports by default; only rewrites with --apply. Conversions from here on
+    are repaired automatically, so this is for a corpus built before that.
+    """
+    configure(resolve_data_dir(args.data_dir), create=False)
+
+    index = load_index()
+    if not index:
+        print("Corpus index is empty; nothing to normalize.")
+        return 0
+
+    damaged = []
+    for name, filename in sorted(index.items()):
+        path = CORPUS_DIR / filename
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        count = extraction_damage(text)
+        if count:
+            damaged.append((name, path, text, count))
+
+    if not damaged:
+        print(f"No extraction damage found across {len(index)} corpus files.")
+        return 0
+
+    total = sum(c for _, _, _, c in damaged)
+    print(f"{len(damaged)} of {len(index)} corpus files carry extraction damage "
+          f"({total} artifacts):\n")
+    for name, _, text, count in damaged:
+        fixed = normalize_extraction(text)
+        sample = next(
+            (f"{b.strip()}  ->  {a.strip()}"
+             for b, a in zip(text.splitlines(), fixed.splitlines())
+             if b != a), "")
+        print(f"  {name}  ({count})")
+        if sample:
+            print(f"      {sample[:150]}")
+
+    if not args.apply:
+        print("\nThis was a report. Re-run with --apply to rewrite these files.")
+        print("Corpus files are regenerated from source-resumes/ only when the")
+        print("source is newer, so repaired text will not be clobbered.")
+        return 0
+
+    for name, path, text, _ in damaged:
+        path.write_text(normalize_extraction(text), encoding="utf-8")
+    print(f"\nRepaired {len(damaged)} file(s).")
+    return 0
+
+
 def run_subcommand(name: str, argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=f"resume-mcp {name}")
     parser.add_argument("--data-dir", help="Corpus location. Defaults to "
@@ -515,14 +648,18 @@ def run_subcommand(name: str, argv: list[str]) -> int:
         parser.add_argument("name", help="Generated resume to promote: a name or a path.")
         parser.add_argument("--as", dest="as_name",
                             help="Corpus name to promote it under. Defaults to the filename stem.")
+    if name == "normalize":
+        parser.add_argument("--apply", action="store_true",
+                            help="Rewrite the damaged files. Without this, only reports.")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING,
                         format="%(levelname)s %(name)s: %(message)s")
-    return cmd_promote(args) if name == "promote" else cmd_review(args)
+    handlers = {"promote": cmd_promote, "review": cmd_review, "normalize": cmd_normalize}
+    return handlers[name](args)
 
 
-SUBCOMMANDS = ("review", "promote")
+SUBCOMMANDS = ("review", "promote", "normalize")
 
 
 def main():

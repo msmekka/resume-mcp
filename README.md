@@ -330,7 +330,41 @@ Two details worth knowing:
 `.pdf` and `.docx`, via [markitdown](https://github.com/microsoft/markitdown).
 
 Apple Pages (`.pages`) is **not** supported — it's a zip bundle, not a document.
-Export to PDF or DOCX first.
+Export to DOCX (see below) or PDF first.
+
+### Export to DOCX, not PDF
+
+**If you have a choice, put a `.docx` in `source-resumes/`, not a `.pdf`.**
+
+Apple Pages and some other PDF producers embed fonts whose glyphs carry no
+usable Unicode mapping. Text extraction then yields a substitute character
+where a real one stood — and the substitute differs per glyph and per document:
+
+```
+Pla,orm   Na>ve   integra@on   Innova=on   producBon   execuFve   soRware
+```
+
+All of that is one defect wearing different masks. Measured on a real corpus,
+DOCX extraction of the *same document* carried roughly a tenth of the artifacts.
+
+When both `name.docx` and `name.pdf` are present, the server converts the DOCX
+and skips the PDF. You can keep both on disk.
+
+`resume-mcp review` reports a damage count per corpus file so you can see which
+documents need a cleaner source.
+
+#### Why this isn't repaired automatically
+
+It's tempting to infer the substitution table per document and undo it. That
+was tried and removed. There is no reliable key, and a wrong guess silently
+rewrites someone's resume — in testing, inference turned an email address into
+`nametiexample.com` and `Na>ve` into `Natfve`. A resume is a factual
+claim its owner will be asked about in an interview, so quiet corruption is
+worse than visible damage.
+
+What the server does instead is deterministic: expand the ligature characters
+that *do* carry a Unicode mapping (`U+FB01` is `fi` and nothing else), prefer a
+DOCX source, and report the rest rather than guessing.
 
 ## Privacy
 

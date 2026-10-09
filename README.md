@@ -132,10 +132,20 @@ Configure it with `curator.json` in your data directory:
 {
   "target_title": "Engineering Leader",
   "cadence_days": 90,
+  "output_dir": "base-resumes",
   "output_name": "base-resume",
   "brag_file": "brag.md"
 }
 ```
+
+Generated base resumes are written to `output_dir`, deliberately **outside** the
+indexed corpus and never added to `config.json`. `markdown-resumes/` holds
+evidence — documents a human wrote and sent to real employers. Generated output
+is derived work. If it were indexed back in, every refresh would read the last
+one as source material, your phrasing would be progressively replaced by the
+model's, and the drift would compound each quarter with nothing anchoring it.
+The agent reads the previous base resume only to check its age and report what
+changed, never to decide what the new one says.
 
 Then either ask for it on demand:
 

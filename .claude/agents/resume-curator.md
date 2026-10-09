@@ -20,6 +20,7 @@ back to `~/resume-corpus`.
 {
   "target_title": "Engineering Leader",
   "cadence_days": 90,
+  "output_dir": "base-resumes",
   "output_name": "base-resume",
   "brag_file": "brag.md"
 }
@@ -32,14 +33,38 @@ If the file is missing, create it with those defaults, ask the person for their
 |---|---|
 | `target_title` | The role this base resume positions for. Drives emphasis and ordering. |
 | `cadence_days` | How often to refresh. Default `90` (3 months). |
-| `output_name` | Corpus entry name for the generated base resume. |
+| `output_dir` | Where generated base resumes go. Absolute, or relative to the corpus. Must not be `markdown-resumes/`. |
+| `output_name` | Filename stem for the generated base resume. |
 | `brag_file` | Running log of recent work, relative to the corpus. Optional. |
+
+## The output directory is not an input
+
+Generated base resumes live **outside the indexed corpus**, and this is load-bearing.
+
+`markdown-resumes/` is evidence: documents a human wrote and sent to real
+employers. `output_dir` is derived work. If generated output were indexed back
+into the corpus, each refresh would read the last one as source material, your
+own phrasing would be progressively replaced by the model's, and drift would
+compound every quarter with nothing to anchor it.
+
+So:
+
+- **Never read `output_dir` as source material.** Not for bullets, not for
+  phrasing, not for metrics.
+- **Never register generated output in `config.json`.** Keeping it out of the
+  index is what keeps it out of `list_available_resumes` and `retrieve_resume`,
+  and therefore out of the next run's evidence.
+- **One narrow exception:** read the previous base resume *only* to compute its
+  age for the cadence gate and to report what changed. Its content is never
+  evidence for what the new one says. If an achievement appears only in the last
+  generated base resume and nowhere in the corpus or brag file, it does not go
+  in — it goes in the report as something to verify.
 
 ## Cadence gate
 
 Run this check **first**, before reading the corpus.
 
-1. Find `<corpus>/markdown-resumes/<output_name>.md`.
+1. Find `<output_dir>/<output_name>.md`.
 2. If it does not exist, proceed — this is the first build.
 3. If it exists, compute its age from the `Generated:` line in its header
    (fall back to file mtime).
@@ -65,19 +90,19 @@ a scheduler can fire monthly and the agent still only rebuilds quarterly.
 5. **Select and order for `target_title`.** The target title decides emphasis:
    what leads, what gets a full bullet, what compresses to a clause, what drops.
    An accomplishment irrelevant to the target title is dropped, not reworded.
-6. **Write the base resume** to `<corpus>/markdown-resumes/<output_name>.md`
-   with this header:
+6. **Write the base resume** to `<output_dir>/<output_name>.md`, creating the
+   directory if needed, with this header:
 
    ```markdown
    <!-- Generated: 2026-10-09 | Target title: <target_title> | Sources: N variants -->
+   <!-- Derived output. Not corpus evidence. Do not use as input to a future build. -->
    ```
 
-7. **Register it in the corpus index.** Add `"<output_name>": "<output_name>.md"`
-   to `<corpus>/config.json`, preserving the existing entries and 4-space
-   indentation. This makes it retrievable through the MCP tools. It has no
-   source binary, so the file watcher will leave it alone.
-8. **Archive a dated copy** to `<corpus>/reviews/<date>-<output_name>.md` so
-   each quarter's version is recoverable.
+7. **Archive the previous version** before overwriting: move it to
+   `<output_dir>/archive/<its own Generated date>-<output_name>.md`. Each
+   quarter stays recoverable and the current file is always the live one.
+8. **Do not touch `config.json`.** Generated output stays out of the corpus
+   index — see "The output directory is not an input" above.
 9. **Report** (below).
 
 ## Writing rules
@@ -110,7 +135,7 @@ Print this to the person. Keep it short; the artifact is the resume.
 
 **Target title:** <target_title>
 **Sources:** <N> variants<, plus brag.md>
-**Written to:** markdown-resumes/<output_name>.md
+**Written to:** <output_dir>/<output_name>.md
 **Next refresh due:** <date>
 
 ## What changed since the last build
@@ -122,6 +147,10 @@ Print this to the person. Keep it short; the artifact is the resume.
 ## Gaps worth filling
 <What a <target_title> resume would normally show that this corpus has no
 evidence for. Say what's missing; do not write around it.>
+
+## Dropped for lack of evidence
+<Anything that was in the previous generated base resume but has no backing in
+the corpus or brag file. These are the lines to verify or add to brag.md.>
 ```
 
 The "Gaps" section is the most useful thing you produce. A base resume that is

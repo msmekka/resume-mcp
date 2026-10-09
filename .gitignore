@@ -4,6 +4,10 @@
 /markdown-resumes/
 /pages-resumes/
 /config.json
+/curator.json
+/base-resumes/
+/generated/
+/logs/
 
 # Never commit resume binaries from anywhere in the tree.
 *.pdf

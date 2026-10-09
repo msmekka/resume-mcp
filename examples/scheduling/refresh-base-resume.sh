@@ -8,7 +8,7 @@
 set -euo pipefail
 
 CORPUS="${RESUME_MCP_DATA_DIR:-$HOME/resume-corpus}"
-LOG="$CORPUS/reviews/curator.log"
+LOG="$CORPUS/logs/curator.log"
 mkdir -p "$(dirname "$LOG")"
 
 {

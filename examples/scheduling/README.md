@@ -55,7 +55,7 @@ The words "now", "force", or "rebuild" override the cadence gate.
 
 ## Logs
 
-Each run appends to `<corpus>/reviews/curator.log`.
+Each run appends to `<corpus>/logs/curator.log`.
 
 ## Why this runs locally, not in the cloud
 

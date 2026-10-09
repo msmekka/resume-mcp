@@ -4,13 +4,24 @@ An [MCP](https://modelcontextprotocol.io) server that turns a folder of resumes
 into a searchable Markdown corpus your AI tools can actually reason over.
 
 Drop a `.pdf` or `.docx` into `source-resumes/`. The server converts it to
-Markdown, indexes it, and keeps watching — so your corpus is always current
-without you running anything. Then ask your assistant things like *"which of my
-resumes mention Kubernetes?"* or *"pull the variant I sent to that fintech role and compare its
-summary to the base one."*
+Markdown, indexes it, and keeps watching — so your corpus stays current without
+you running anything. Then ask your assistant *"which of my resumes mention
+Kubernetes?"* or *"pull the variant I sent to that fintech role and compare its
+summary to my base one."*
 
 Built for the specific problem of having **many tailored variants** of one
 resume and no good way to search across them.
+
+- [Why](#why)
+- [Quick start](#quick-start) — install and try it in two minutes
+- [Set up your own corpus](#set-up-your-own-corpus)
+- [Connect it to your AI tools](#connect-it-to-your-ai-tools)
+- [Configuration reference](#configuration-reference)
+- [Keeping a base resume current](#keeping-a-base-resume-current) — the curator agent
+- [The human in the loop](#the-human-in-the-loop) — how generated output enters the corpus
+- [Reference](#reference) — tools and commands
+- [How it works](#how-it-works)
+- [Privacy](#privacy)
 
 ## Why
 
@@ -22,47 +33,46 @@ This makes that history a first-class corpus:
 
 - **Grounded, not invented.** The assistant quotes what you actually wrote.
 - **Always current.** A file watcher reconciles on startup and on change.
-- **Your data stays local.** Nothing leaves your machine.
+- **Your data stays local.** The server makes no network calls.
 
-## Tools
+## Quick start
 
-| Tool | What it does |
-|---|---|
-| `list_available_resumes` | Lists every variant in the index. |
-| `retrieve_resume(resume_name)` | Returns one variant's full Markdown. |
-| `find_resume(query_string)` | Case-insensitive search across names and content, with matching-line excerpts. |
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `resume-mcp` | Runs the MCP server (what your AI client invokes). |
-| `resume-mcp review` | Lists generated base resumes and whether each is in the corpus. |
-| `resume-mcp promote <name>` | Shows a generated resume and, on your confirmation, adds it to the corpus. |
-
-## Install
-
-Requires Python 3.10+.
+Requires Python 3.10 or newer.
 
 ```bash
 git clone https://github.com/msmekka/resume-mcp.git
 cd resume-mcp
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate
+pip install .
 ```
 
-## Try it without your own data
+Confirm it works against the bundled fictional corpus:
 
 ```bash
-resume-mcp --data-dir ./examples/sample-data
+resume-mcp review --data-dir ./examples/sample-data   # should print "No generated resumes"
+resume-mcp --data-dir ./examples/sample-data          # starts the server
 ```
 
-That loads a fictional two-variant corpus. See [`examples/sample-data`](examples/sample-data).
+The second command starts an MCP server on stdio and will sit there waiting for
+a client — that's correct behavior. Press Ctrl-C and move on to wiring it into
+your AI tool below. See [`examples/sample-data`](examples/sample-data) for what
+the sample corpus contains.
+
+> **A note on `pip install -e .`**
+>
+> Editable installs are the usual choice if you plan to modify the source, but
+> on Python 3.14 the editable install did not load correctly in testing: `pip`
+> reported success while `import resume_mcp` failed from any directory other
+> than the repo root — a confusing failure, because running from the repo root
+> appears to work. `pip install .` is used above because it has no such
+> problem. If you do edit the source, re-run `pip install .` to pick up your
+> changes, or try `uv pip install -e .`, which uses a different mechanism.
 
 ## Set up your own corpus
 
-Your resumes live in a **data directory**, which is deliberately separate from
-this repo so your personal history never ends up in version control.
+Your resumes live in a **data directory** that is deliberately separate from
+this repo, so your personal history never lands in version control.
 
 ```bash
 mkdir -p ~/resume-corpus/source-resumes
@@ -70,39 +80,34 @@ cp ~/Documents/resumes/*.pdf ~/resume-corpus/source-resumes/
 resume-mcp --data-dir ~/resume-corpus
 ```
 
-The server creates and maintains:
+On startup it converts everything it finds, then watches for changes. The data
+directory ends up looking like this:
 
 ```
 ~/resume-corpus/
 ├── source-resumes/      # you put .pdf / .docx here
-├── markdown-resumes/    # generated Markdown corpus
-└── config.json          # name -> markdown filename index
+├── markdown-resumes/    # the corpus: generated Markdown, one per source
+├── config.json          # index: corpus name -> markdown filename
+├── curator.json         # optional, see "Keeping a base resume current"
+└── base-resumes/        # optional, generated output (NOT part of the corpus)
 ```
 
-### Configuration
-
-| Setting | Env var | Flag | Default |
-|---|---|---|---|
-| Data directory | `RESUME_MCP_DATA_DIR` | `--data-dir` | working directory |
-| Server name | `RESUME_MCP_SERVER_NAME` | — | `Resume Corpus Manager` |
-| Disable file watcher | — | `--no-watch` | watcher on |
-
-`--data-dir` wins over `RESUME_MCP_DATA_DIR`, which wins over the working
-directory. Use `--no-watch` for one-shot/batch contexts (CI, a cron job) where
-a background observer thread isn't wanted.
+Only `source-resumes/` is yours to manage by hand. The rest the server
+maintains.
 
 ## Connect it to your AI tools
 
 ### Claude Code
 
 ```bash
-claude mcp add resume -- resume-mcp --data-dir ~/resume-corpus
+claude mcp add resume -- /absolute/path/to/.venv/bin/resume-mcp \
+  --data-dir ~/resume-corpus
 ```
 
 ### Claude Desktop
 
-In `~/Library/Application Support/Claude/claude_desktop_config.json`
-(macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+In `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
@@ -115,26 +120,33 @@ In `~/Library/Application Support/Claude/claude_desktop_config.json`
 }
 ```
 
-Use absolute paths — the desktop app does not inherit your shell's `PATH` or
-virtualenv.
+Use absolute paths for both. The desktop app does not inherit your shell's
+`PATH` or your activated virtualenv, so a bare `resume-mcp` will not be found.
 
 ### Anything else that speaks MCP
 
 The server runs over stdio. Point any MCP client at the `resume-mcp` command
 with a `--data-dir` argument.
 
-## Keeping a base resume current
+## Configuration reference
 
-The repo also ships a [`resume-curator`](.claude/agents/resume-curator.md) agent
-for Claude Code. It synthesizes a general-purpose **base resume** for a target
-title — "Engineering Leader", "Staff Data Scientist" — by curating the strongest
-existing bullets from across your variants, and refreshes it on a cadence
-(default every 3 months).
+Everything you can personalize, in one place.
 
-It curates; it does not write fiction. Every line has to trace back to something
-already in your corpus, and the report tells you which gaps it could not fill.
+### Where the corpus lives
 
-Configure it with `curator.json` in your data directory:
+| Setting | Flag | Env var | Default |
+|---|---|---|---|
+| Data directory | `--data-dir` | `RESUME_MCP_DATA_DIR` | working directory |
+| Server name, as your client displays it | — | `RESUME_MCP_SERVER_NAME` | `Resume Corpus Manager` |
+| Skip the live file watcher | `--no-watch` | — | watcher on |
+
+`--data-dir` wins over `RESUME_MCP_DATA_DIR`, which wins over the working
+directory. `--no-watch` reconciles once and skips the background observer, for
+one-shot contexts like CI or a cron job.
+
+### `curator.json` — the base resume agent
+
+Optional. Lives in your data directory. Only the curator agent reads it.
 
 ```json
 {
@@ -146,46 +158,113 @@ Configure it with `curator.json` in your data directory:
 }
 ```
 
-Generated base resumes are written to `output_dir`, deliberately **outside** the
-indexed corpus and never added to `config.json`. `markdown-resumes/` holds
-evidence — documents a human wrote and sent to real employers. Generated output
-is derived work. If it were indexed back in, every refresh would read the last
-one as source material, your phrasing would be progressively replaced by the
-model's, and the drift would compound each quarter with nothing anchoring it.
-The agent reads the previous base resume only to check its age and report what
-changed, never to decide what the new one says.
+| Field | Meaning |
+|---|---|
+| `target_title` | The role the base resume positions for. Drives what leads and what drops. **Set this yourself — the agent will not guess it.** |
+| `cadence_days` | How often to rebuild. Default `90`. |
+| `output_dir` | Where generated resumes go. Absolute, or relative to the data directory. Must not be `markdown-resumes/`. |
+| `output_name` | Filename stem for the generated resume. |
+| `brag_file` | A running log of recent work, relative to the data directory. Optional but see below. |
 
-### Promoting a generated resume into the corpus
+**Write a `brag.md`.** Without one the agent can only reorganize what your
+existing resumes already say. Anything you've done since your last tailored
+resume is invisible to it. A few bullets a month is enough.
 
-Generated output is not permanently quarantined — it just needs a person to
-approve it:
+## Keeping a base resume current
+
+The repo ships a [`resume-curator`](.claude/agents/resume-curator.md) agent for
+Claude Code. It builds a general-purpose **base resume** for your
+`target_title` — "Engineering Leader", "Staff Data Scientist" — by curating the
+strongest bullets from across your tailored variants, and refreshes it every
+`cadence_days`.
+
+It curates; it does not write fiction. Every line must trace back to something
+already in your corpus or your brag file. Where two variants quote the same
+achievement with different numbers it reports the conflict instead of picking
+one. Its report names the gaps it could not fill rather than writing around
+them.
+
+Install the agent where a scheduler can find it:
 
 ```bash
-resume-mcp promote base-resume --data-dir ~/resume-corpus
+mkdir -p ~/.claude/agents
+ln -sfn "$PWD/.claude/agents/resume-curator.md" ~/.claude/agents/resume-curator.md
 ```
 
-That prints the document, explains that promoting makes it searchable,
-retrievable, and available as evidence to future generations, and asks for
-confirmation. Only then is it copied into `markdown-resumes/` and indexed.
-
-**It refuses to run without an interactive terminal.** A cron job, a piped
-`yes`, or a headless agent all get turned away — the check exists to guarantee a
-person actually read it, so there is deliberately no `--yes` flag. The agent is
-instructed never to invoke it.
-
-It also refuses to promote under a name that already exists in the corpus, or
-one that matches a file in `source-resumes/` — the next reconcile would
-regenerate that Markdown and silently discard the promoted copy.
-
-Then either ask for it on demand:
+Then run it on demand:
 
 ```
 Use the resume-curator agent to refresh my base resume.
 ```
 
-or schedule it — see [`examples/scheduling`](examples/scheduling), which covers
-the one non-obvious setup step and why the trigger fires more often than the
-cadence.
+Add "now" or "rebuild" to override the cadence and force a fresh build. To run
+it on a schedule, see [`examples/scheduling`](examples/scheduling).
+
+## The human in the loop
+
+Generated base resumes are written to `output_dir`, **outside** the indexed
+corpus, and are never added to `config.json`.
+
+This is the most important design decision in the project, so it's worth being
+explicit about why. `markdown-resumes/` holds *evidence*: documents a person
+wrote and sent to real employers. A generated base resume is *derived work*. If
+derived work were indexed back in as evidence, every refresh would read the
+previous generation as source material, your own phrasing would be
+progressively replaced by the model's, and the drift would compound every
+quarter with nothing anchoring it.
+
+So the agent reads the previous base resume for exactly two purposes — checking
+its age, and reporting what changed — and never to decide what the new one says.
+
+### Promoting a generated resume
+
+Generated output isn't quarantined forever. Sometimes a generated base resume is
+genuinely good and you want it treated as evidence later. It just needs a person
+to read it first.
+
+```bash
+resume-mcp review --data-dir ~/resume-corpus
+resume-mcp promote base-resume --data-dir ~/resume-corpus
+```
+
+`promote` prints the whole document, states that promoting makes it searchable,
+retrievable, and available as source material to future generations, and asks
+for confirmation. Only on `y` is it copied into `markdown-resumes/` and indexed.
+
+**It refuses to run without an interactive terminal.** A cron job, a piped
+`yes`, and a headless agent are all turned away. The check's only purpose is to
+guarantee a person actually read the document, so there is deliberately **no
+`--yes` flag** — a bypass would delete the feature. The curator agent is
+instructed never to invoke `promote`, and never to reach the same result by
+editing `config.json` or copying into `markdown-resumes/` by hand.
+
+It also refuses two unsafe names:
+
+- one already in the corpus, and
+- one matching a file in `source-resumes/` — the next reconcile would regenerate
+  that Markdown from the binary and silently discard the promoted copy.
+
+## Reference
+
+### MCP tools
+
+What your AI client can call.
+
+| Tool | What it does |
+|---|---|
+| `list_available_resumes` | Lists every variant in the index. |
+| `retrieve_resume(resume_name)` | Returns one variant's full Markdown. |
+| `find_resume(query_string)` | Case-insensitive search across names and content, with matching-line excerpts. |
+
+### Commands
+
+What you run in a terminal. All accept `--data-dir`.
+
+| Command | What it does |
+|---|---|
+| `resume-mcp` | Runs the MCP server. This is what your AI client invokes. |
+| `resume-mcp review` | Lists generated base resumes and whether each is in the corpus. Read-only. |
+| `resume-mcp promote <name>` | Shows a generated resume and, on your confirmation, adds it to the corpus. Interactive only. |
 
 ## How it works
 
@@ -215,24 +294,24 @@ Two details worth knowing:
   Markdown is missing or older than the source. Hand-edits you make directly to
   files in `markdown-resumes/` survive a restart.
 
-## Supported formats
+### Supported formats
 
 `.pdf` and `.docx`, via [markitdown](https://github.com/microsoft/markitdown).
 
-Apple Pages (`.pages`) is **not** supported — it's a zip bundle, not a
-document. Export to PDF or DOCX first.
+Apple Pages (`.pages`) is **not** supported — it's a zip bundle, not a document.
+Export to PDF or DOCX first.
 
 ## Privacy
 
 Your resume corpus is personal data: full name, address, phone, employers,
-dates. This project is built so that data stays out of git — `.gitignore`
-excludes `source-resumes/`, `markdown-resumes/`, `config.json`, and every
-`.pdf`/`.docx`/`.pages` in the tree. Keeping your data directory outside the
-repo entirely (as the setup above does) is the safest arrangement.
+dates. This project is built so that data stays out of git. `.gitignore`
+excludes `source-resumes/`, `markdown-resumes/`, `base-resumes/`, `config.json`,
+`curator.json`, and every `.pdf`/`.docx`/`.pages` in the tree. Keeping your data
+directory outside the repo entirely, as the setup above does, is safer still.
 
 The server reads and writes only your local filesystem and makes no network
-calls. What your *AI client* does with the text it retrieves is governed by
-that client's own privacy terms.
+calls. What your *AI client* does with the text it retrieves is governed by that
+client's own privacy terms.
 
 ## License
 

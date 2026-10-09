@@ -19,6 +19,7 @@ resume and no good way to search across them.
 - [Configuration reference](#configuration-reference)
 - [Keeping a base resume current](#keeping-a-base-resume-current) — the curator agent
 - [The human in the loop](#the-human-in-the-loop) — how generated output enters the corpus
+- [Drafting a resume for one job posting](#drafting-a-resume-for-one-job-posting)
 - [Reference](#reference) — tools and commands
 - [How it works](#how-it-works)
 - [Privacy](#privacy)
@@ -244,6 +245,27 @@ It also refuses two unsafe names:
 - one matching a file in `source-resumes/` — the next reconcile would regenerate
   that Markdown from the binary and silently discard the promoted copy.
 
+## Drafting a resume for one job posting
+
+`draft_resume` exists so an automated job-search agent can produce a tailored
+resume without being able to contaminate the corpus. The intended flow:
+
+1. The agent calls `list_available_resumes`, then `find_resume` with phrases
+   from the posting, then `retrieve_resume` on the closest variants.
+2. It assembles a draft from text that already exists in those variants.
+3. It calls `draft_resume`, which writes to `output_dir/jobs/` with a header
+   recording the date, the role, and the posting URL.
+
+The draft is **not** indexed, so it is invisible to `list_available_resumes`,
+`retrieve_resume`, and `find_resume` — including on the agent's next run. It
+becomes evidence only when you `promote` it, which still requires a terminal.
+
+`draft_resume` refuses to write if `output_dir` resolves inside the corpus, and
+suffixes rather than overwrites when two drafts share a company, role, and day.
+
+See [`examples/scheduling`](examples/scheduling) for wiring this into a daily
+agent.
+
 ## Reference
 
 ### MCP tools
@@ -254,7 +276,11 @@ What your AI client can call.
 |---|---|
 | `list_available_resumes` | Lists every variant in the index. |
 | `retrieve_resume(resume_name)` | Returns one variant's full Markdown. |
-| `find_resume(query_string)` | Case-insensitive search across names and content, with matching-line excerpts. |
+| `find_resume(query_string)` | Case-insensitive **substring** search across names and content, with matching-line excerpts. |
+| `draft_resume(company, role, markdown, job_url)` | Saves a tailored resume draft to `output_dir/jobs/`, outside the corpus. Does not index it. |
+
+`find_resume` matches substrings, not words, so a short query can over-match —
+`RAG` also hits "sto**rag**e" and "leve**rag**e". Prefer multi-word phrases.
 
 ### Commands
 

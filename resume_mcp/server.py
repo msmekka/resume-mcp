@@ -289,6 +289,68 @@ def find_resume(query_string: str) -> str:
     return "Search results:\n" + "\n".join(results)
 
 
+
+def slugify(text: str) -> str:
+    """Filesystem-safe lowercase slug, for naming a draft after a job."""
+    cleaned = [c.lower() if c.isalnum() else "-" for c in text.strip()]
+    slug = "".join(cleaned)
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-")[:60] or "untitled"
+
+
+@mcp.tool()
+def draft_resume(company: str, role: str, markdown: str, job_url: str = "") -> str:
+    """Saves a tailored resume draft for one job posting.
+
+    Writes to the generated-output directory, never into the corpus. The draft is
+    not searchable or retrievable until a person reviews it and runs
+    'resume-mcp promote'. Use list_available_resumes and retrieve_resume first so
+    the draft is built from what the person actually wrote.
+    """
+    if not markdown.strip():
+        return "Error: markdown is empty. Nothing was written."
+
+    output_dir = resolve_output_dir()
+
+    #a draft written inside the corpus would become evidence for the next draft
+    try:
+        output_dir.relative_to(CORPUS_DIR)
+    except ValueError:
+        pass
+    else:
+        return (f"Refused: output_dir ({output_dir}) is inside the corpus "
+                f"({CORPUS_DIR}). Generated drafts must stay out of the corpus.")
+
+    jobs_dir = output_dir / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    today = date.today().isoformat()
+    name = f"{today}-{slugify(company)}-{slugify(role)}"
+    target = jobs_dir / f"{name}.md"
+
+    #a second draft for the same role on the same day gets a suffix rather than
+    #overwriting the first
+    counter = 2
+    while target.exists():
+        target = jobs_dir / f"{name}-{counter}.md"
+        counter += 1
+
+    header = [
+        f"<!-- Generated: {today} | Tailored for: {role} at {company} -->",
+        "<!-- Derived output. Not corpus evidence. Never use as input to another draft. -->",
+    ]
+    if job_url:
+        header.insert(1, f"<!-- Posting: {job_url} -->")
+
+    target.write_text("\n".join(header) + "\n\n" + markdown.strip() + "\n",
+                      encoding="utf-8")
+
+    return (f"Draft saved to {target}\n"
+            f"It is NOT in the corpus. After reading it, a person can promote it with:\n"
+            f"  resume-mcp promote {target.stem} --data-dir {DATA_DIR}")
+
+
 #--------PROMOTION GATE-------------
 #Generated base resumes land outside the corpus. They can be promoted into it,
 #but only by a person at a terminal: a resume written by a model should not
@@ -320,7 +382,7 @@ def list_generated() -> list[Path]:
     output_dir = resolve_output_dir()
     if not output_dir.is_dir():
         return []
-    files = [f for f in output_dir.iterdir() if f.is_file() and f.suffix.lower() == ".md"]
+    files = [f for f in output_dir.rglob("*.md") if f.is_file()]
     return sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)
 
 
@@ -356,10 +418,11 @@ def cmd_review(args) -> int:
     index = load_index()
     promoted = set(index.values())
     print(f"Generated resumes in {resolve_output_dir()}:\n")
+    output_dir = resolve_output_dir()
     for f in generated:
         state = "in corpus" if f.name in promoted else "not in corpus"
         modified = date.fromtimestamp(f.stat().st_mtime).isoformat()
-        print(f"  {f.stem}")
+        print(f"  {f.relative_to(output_dir)}")
         print(f"    {state}, modified {modified}")
     print("\nPromote one with:  resume-mcp promote <name>")
     print("Promotion is interactive by design -- a person reads it first.")
@@ -372,7 +435,15 @@ def cmd_promote(args) -> int:
 
     candidate = Path(args.name).expanduser()
     if not candidate.is_file():
-        candidate = resolve_output_dir() / f"{Path(args.name).stem}.md"
+        stem = Path(args.name).stem
+        matches = [f for f in list_generated() if f.stem == stem]
+        if len(matches) > 1:
+            print(f"Ambiguous: {len(matches)} drafts named '{stem}'. Pass a full path:",
+                  file=sys.stderr)
+            for m in matches:
+                print(f"  {m}", file=sys.stderr)
+            return 1
+        candidate = matches[0] if matches else resolve_output_dir() / f"{stem}.md"
     if not candidate.is_file():
         print(f"Not found: {candidate}", file=sys.stderr)
         print(f"Run 'resume-mcp review --data-dir {DATA_DIR}' to see what is available.",

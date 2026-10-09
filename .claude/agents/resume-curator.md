@@ -60,6 +60,17 @@ So:
   generated base resume and nowhere in the corpus or brag file, it does not go
   in — it goes in the report as something to verify.
 
+### Promotion is not yours to do
+
+A generated base resume *can* become corpus evidence — but only after a person
+has read it. That is what `resume-mcp promote` is for, and it refuses to run
+without an interactive terminal.
+
+**Never run `resume-mcp promote`.** Do not pipe input to it, do not work around
+the terminal check, and do not copy a file into `markdown-resumes/` or add an
+entry to `config.json` by hand to achieve the same effect. Your job ends at
+writing the file and telling the person the command.
+
 ## Cadence gate
 
 Run this check **first**, before reading the corpus.
@@ -151,6 +162,11 @@ evidence for. Say what's missing; do not write around it.>
 ## Dropped for lack of evidence
 <Anything that was in the previous generated base resume but has no backing in
 the corpus or brag file. These are the lines to verify or add to brag.md.>
+
+---
+Read it, then promote it into the corpus if you want it used as evidence later:
+
+    resume-mcp promote <output_name> --data-dir <corpus>
 ```
 
 The "Gaps" section is the most useful thing you produce. A base resume that is

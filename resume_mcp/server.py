@@ -3,6 +3,9 @@ import itertools
 import json
 import logging
 import os
+import shutil
+import sys
+from datetime import date
 import threading
 from pathlib import Path
 
@@ -13,6 +16,8 @@ from watchdog.observers import Observer
 
 SUPPORTED_FILE_TYPES = ['.pdf', '.docx']
 DEFAULT_SERVER_NAME = "Resume Corpus Manager"
+CURATOR_FILE_NAME = "curator.json"
+DEFAULT_OUTPUT_DIR = "base-resumes"
 
 logger = logging.getLogger(__name__)
 
@@ -284,11 +289,153 @@ def find_resume(query_string: str) -> str:
     return "Search results:\n" + "\n".join(results)
 
 
+#--------PROMOTION GATE-------------
+#Generated base resumes land outside the corpus. They can be promoted into it,
+#but only by a person at a terminal: a resume written by a model should not
+#become evidence for the next one without someone having read it first.
+
+def load_curator_config() -> dict:
+    """Reads curator.json for the generated-output location. Defaults if absent."""
+    defaults = {"output_dir": DEFAULT_OUTPUT_DIR, "output_name": "base-resume"}
+    path = DATA_DIR / CURATOR_FILE_NAME
+    if not path.exists():
+        return defaults
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            defaults.update(json.load(f))
+    except json.JSONDecodeError:
+        logger.warning("%s is not valid JSON; using defaults", path)
+    return defaults
+
+
+def resolve_output_dir(config: dict | None = None) -> Path:
+    """Generated-output directory: absolute as given, else relative to the data dir."""
+    config = config if config is not None else load_curator_config()
+    raw = Path(str(config.get("output_dir", DEFAULT_OUTPUT_DIR))).expanduser()
+    return raw if raw.is_absolute() else (DATA_DIR / raw).resolve()
+
+
+def list_generated() -> list[Path]:
+    """Generated base resumes awaiting a decision, newest first."""
+    output_dir = resolve_output_dir()
+    if not output_dir.is_dir():
+        return []
+    files = [f for f in output_dir.iterdir() if f.is_file() and f.suffix.lower() == ".md"]
+    return sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)
+
+
+def promote_generated(source: Path, corpus_name: str) -> str:
+    """Copies a generated resume into the corpus and indexes it.
+
+    Callers are responsible for obtaining human approval first; this function
+    performs no checks of its own beyond refusing to shadow a tracked source.
+    """
+    if (CORPUS_DIR / f"{corpus_name}.md").exists():
+        return f"Refused: '{corpus_name}' already exists in the corpus."
+
+    #a source binary with this stem would have its markdown regenerated on the
+    #next reconcile, silently discarding whatever was promoted here
+    for suffix in SUPPORTED_FILE_TYPES:
+        if (SOURCE_DIR / f"{corpus_name}{suffix}").exists():
+            return (f"Refused: source-resumes/{corpus_name}{suffix} exists, and "
+                    f"reconcile would overwrite the promoted copy. Pick another name.")
+
+    shutil.copy2(source, CORPUS_DIR / f"{corpus_name}.md")
+    update_config_index(corpus_name, f"{corpus_name}.md")
+    return f"Promoted '{corpus_name}' into the corpus."
+
+
+def cmd_review(args) -> int:
+    """Shows generated base resumes and whether each is in the corpus yet."""
+    configure(resolve_data_dir(args.data_dir), create=False)
+    generated = list_generated()
+    if not generated:
+        print(f"No generated resumes in {resolve_output_dir()}")
+        return 0
+
+    index = load_index()
+    promoted = set(index.values())
+    print(f"Generated resumes in {resolve_output_dir()}:\n")
+    for f in generated:
+        state = "in corpus" if f.name in promoted else "not in corpus"
+        modified = date.fromtimestamp(f.stat().st_mtime).isoformat()
+        print(f"  {f.stem}")
+        print(f"    {state}, modified {modified}")
+    print("\nPromote one with:  resume-mcp promote <name>")
+    print("Promotion is interactive by design -- a person reads it first.")
+    return 0
+
+
+def cmd_promote(args) -> int:
+    """Human-in-the-loop promotion of one generated resume into the corpus."""
+    configure(resolve_data_dir(args.data_dir), create=False)
+
+    candidate = Path(args.name).expanduser()
+    if not candidate.is_file():
+        candidate = resolve_output_dir() / f"{Path(args.name).stem}.md"
+    if not candidate.is_file():
+        print(f"Not found: {candidate}", file=sys.stderr)
+        print(f"Run 'resume-mcp review --data-dir {DATA_DIR}' to see what is available.",
+              file=sys.stderr)
+        return 1
+
+    #the gate. a cron job, a headless agent, or a piped script has no person in
+    #it, and this step exists precisely to require one.
+    if not sys.stdin.isatty():
+        print("Refused: promotion requires an interactive terminal.", file=sys.stderr)
+        print("A generated resume should be read by a person before it becomes "
+              "evidence for the next one.", file=sys.stderr)
+        return 2
+
+    text = candidate.read_text(encoding="utf-8")
+    corpus_name = args.as_name or candidate.stem
+
+    print("=" * 72)
+    print(text)
+    print("=" * 72)
+    print(f"\nSource:       {candidate}")
+    print(f"Promote into: {CORPUS_DIR}/{corpus_name}.md")
+    print("\nOnce promoted this becomes corpus evidence: searchable, retrievable,")
+    print("and available as source material the next time a resume is generated.")
+
+    answer = input(f"\nPromote '{corpus_name}' into the corpus? [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("Not promoted.")
+        return 0
+
+    print(promote_generated(candidate, corpus_name))
+    return 0
+
+
 #--------INITIALIZATION CONTROLLER-------------
+def run_subcommand(name: str, argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog=f"resume-mcp {name}")
+    parser.add_argument("--data-dir", help="Corpus location. Defaults to "
+                                           "$RESUME_MCP_DATA_DIR, then the working directory.")
+    if name == "promote":
+        parser.add_argument("name", help="Generated resume to promote: a name or a path.")
+        parser.add_argument("--as", dest="as_name",
+                            help="Corpus name to promote it under. Defaults to the filename stem.")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.WARNING,
+                        format="%(levelname)s %(name)s: %(message)s")
+    return cmd_promote(args) if name == "promote" else cmd_review(args)
+
+
+SUBCOMMANDS = ("review", "promote")
+
+
 def main():
+    #bare invocation runs the MCP server, so an existing MCP client config
+    #keeps working unchanged; subcommands are opt-in by name
+    if len(sys.argv) > 1 and sys.argv[1] in SUBCOMMANDS:
+        return run_subcommand(sys.argv[1], sys.argv[2:])
+
     parser = argparse.ArgumentParser(
         prog="resume-mcp",
-        description="MCP server that keeps a searchable Markdown corpus of your resumes.",
+        description="MCP server that keeps a searchable Markdown corpus of your resumes. "
+                    "Subcommands: review, promote.",
     )
     parser.add_argument(
         "--data-dir",
@@ -328,4 +475,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

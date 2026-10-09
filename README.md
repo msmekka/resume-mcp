@@ -32,6 +32,14 @@ This makes that history a first-class corpus:
 | `retrieve_resume(resume_name)` | Returns one variant's full Markdown. |
 | `find_resume(query_string)` | Case-insensitive search across names and content, with matching-line excerpts. |
 
+## Commands
+
+| Command | What it does |
+|---|---|
+| `resume-mcp` | Runs the MCP server (what your AI client invokes). |
+| `resume-mcp review` | Lists generated base resumes and whether each is in the corpus. |
+| `resume-mcp promote <name>` | Shows a generated resume and, on your confirmation, adds it to the corpus. |
+
 ## Install
 
 Requires Python 3.10+.
@@ -146,6 +154,28 @@ one as source material, your phrasing would be progressively replaced by the
 model's, and the drift would compound each quarter with nothing anchoring it.
 The agent reads the previous base resume only to check its age and report what
 changed, never to decide what the new one says.
+
+### Promoting a generated resume into the corpus
+
+Generated output is not permanently quarantined — it just needs a person to
+approve it:
+
+```bash
+resume-mcp promote base-resume --data-dir ~/resume-corpus
+```
+
+That prints the document, explains that promoting makes it searchable,
+retrievable, and available as evidence to future generations, and asks for
+confirmation. Only then is it copied into `markdown-resumes/` and indexed.
+
+**It refuses to run without an interactive terminal.** A cron job, a piped
+`yes`, or a headless agent all get turned away — the check exists to guarantee a
+person actually read it, so there is deliberately no `--yes` flag. The agent is
+instructed never to invoke it.
+
+It also refuses to promote under a name that already exists in the corpus, or
+one that matches a file in `source-resumes/` — the next reconcile would
+regenerate that Markdown and silently discard the promoted copy.
 
 Then either ask for it on demand:
 

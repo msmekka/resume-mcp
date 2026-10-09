@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS launchd job: fires the curator on the 1st of each month at 09:00.
+     The agent's own cadence gate decides whether to actually rebuild. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.resume-curator</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/refresh-base-resume.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RESUME_MCP_DATA_DIR</key>
+    <string>/ABSOLUTE/PATH/TO/your-corpus</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Day</key><integer>1</integer>
+    <key>Hour</key><integer>9</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

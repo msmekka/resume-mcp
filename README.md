@@ -115,6 +115,38 @@ virtualenv.
 The server runs over stdio. Point any MCP client at the `resume-mcp` command
 with a `--data-dir` argument.
 
+## Keeping a base resume current
+
+The repo also ships a [`resume-curator`](.claude/agents/resume-curator.md) agent
+for Claude Code. It synthesizes a general-purpose **base resume** for a target
+title — "Engineering Leader", "Staff Data Scientist" — by curating the strongest
+existing bullets from across your variants, and refreshes it on a cadence
+(default every 3 months).
+
+It curates; it does not write fiction. Every line has to trace back to something
+already in your corpus, and the report tells you which gaps it could not fill.
+
+Configure it with `curator.json` in your data directory:
+
+```json
+{
+  "target_title": "Engineering Leader",
+  "cadence_days": 90,
+  "output_name": "base-resume",
+  "brag_file": "brag.md"
+}
+```
+
+Then either ask for it on demand:
+
+```
+Use the resume-curator agent to refresh my base resume.
+```
+
+or schedule it — see [`examples/scheduling`](examples/scheduling), which covers
+the one non-obvious setup step and why the trigger fires more often than the
+cadence.
+
 ## How it works
 
 ```

@@ -1,0 +1,4 @@
+# Runtime dependencies. Prefer `pip install -e .` which reads pyproject.toml.
+fastmcp>=2.0.0
+watchdog>=4.0.0
+markitdown[pdf,docx]>=0.1.0

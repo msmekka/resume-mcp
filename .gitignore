@@ -1,0 +1,31 @@
+# Your resume corpus is YOUR data. It never belongs in this repo.
+# Anchored to the repo root so examples/sample-data/* still tracks.
+/source-resumes/
+/markdown-resumes/
+/pages-resumes/
+/config.json
+
+# Never commit resume binaries from anywhere in the tree.
+*.pdf
+*.docx
+*.pages
+*.doc
+*.rtf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+resume.ai/
+.pytest_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

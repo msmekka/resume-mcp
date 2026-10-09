@@ -3,6 +3,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 from datetime import date
@@ -250,10 +251,27 @@ def retrieve_resume(resume_name: str) -> str:
         return f.read()
 
 
+def build_query_pattern(query: str) -> re.Pattern:
+    """Compiles a whole-word, case-insensitive matcher for a search phrase.
+
+    Uses \\W lookarounds rather than \\b so that queries ending or starting in
+    punctuation still behave: \\b would fail on "C++", ".NET" and "CI/CD",
+    because \\b asserts a word character on one side. Asserting only that the
+    match is not flanked by word characters keeps "RAG" from matching
+    "storage" while leaving "C++" searchable.
+    """
+    return re.compile(r"(?<!\w)" + re.escape(query) + r"(?!\w)", re.IGNORECASE)
+
+
 @mcp.tool()
 def find_resume(query_string: str) -> str:
-    """Search resume names and Markdown content for a case-insensitive phrase."""
-    query = query_string.strip().casefold()
+    """Search resume names and content for a whole-word, case-insensitive phrase.
+
+    Matches whole words, so 'RAG' finds 'RAG' and 'hybrid RAG' but not
+    'storage' or 'leverage'. Punctuated terms like 'C++', '.NET' and 'CI/CD'
+    work as written.
+    """
+    query = query_string.strip()
     if not query:
         return "Please provide a search phrase"
 
@@ -261,20 +279,22 @@ def find_resume(query_string: str) -> str:
     if not data:
         return "Your resume corpus index is empty"
 
+    pattern = build_query_pattern(query)
+    folded = query.casefold()
+
     results = []
+    substring_only = []
     for name, filename in data.items():
         target_md = CORPUS_DIR / filename
         if not target_md.is_file():
             continue
 
         with open(target_md, "r", encoding="utf-8") as f:
-            matching_lines = [
-                line.strip()
-                for line in f
-                if query in line.casefold()
-            ]
+            lines = f.readlines()
 
-        if query in name.casefold() or matching_lines:
+        matching_lines = [line.strip() for line in lines if pattern.search(line)]
+
+        if pattern.search(name) or matching_lines:
             result = f" - {name}"
             if matching_lines:
                 excerpts = matching_lines[:3]
@@ -282,8 +302,16 @@ def find_resume(query_string: str) -> str:
                 if len(matching_lines) > len(excerpts):
                     result += f"\n   ... and {len(matching_lines) - len(excerpts)} more matching lines"
             results.append(result)
+        elif folded in name.casefold() or any(folded in line.casefold() for line in lines):
+            #matched only inside a longer word; worth reporting so an empty
+            #result does not read as "nothing in the corpus"
+            substring_only.append(name)
 
     if not results:
+        if substring_only:
+            return (f"Search results: no whole-word match for '{query}'. "
+                    f"{len(substring_only)} variant(s) contain it inside a longer "
+                    f"word (e.g. 'RAG' within 'storage'). Try a longer phrase.")
         return "Search results: No resumes match the query"
 
     return "Search results:\n" + "\n".join(results)

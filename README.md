@@ -263,8 +263,10 @@ becomes evidence only when you `promote` it, which still requires a terminal.
 `draft_resume` refuses to write if `output_dir` resolves inside the corpus, and
 suffixes rather than overwrites when two drafts share a company, role, and day.
 
-See [`examples/scheduling`](examples/scheduling) for wiring this into a daily
-agent.
+For a step-by-step walkthrough of connecting this to a scheduled Claude Desktop
+(Cowork) task — including why the task can't read your files directly but can
+call these tools — see [`docs/cowork-integration.md`](docs/cowork-integration.md).
+For a local cron/launchd schedule, see [`examples/scheduling`](examples/scheduling).
 
 ## Reference
 
@@ -276,11 +278,14 @@ What your AI client can call.
 |---|---|
 | `list_available_resumes` | Lists every variant in the index. |
 | `retrieve_resume(resume_name)` | Returns one variant's full Markdown. |
-| `find_resume(query_string)` | Case-insensitive **substring** search across names and content, with matching-line excerpts. |
+| `find_resume(query_string)` | Whole-word, case-insensitive search across names and content, with matching-line excerpts. |
 | `draft_resume(company, role, markdown, job_url)` | Saves a tailored resume draft to `output_dir/jobs/`, outside the corpus. Does not index it. |
 
-`find_resume` matches substrings, not words, so a short query can over-match —
-`RAG` also hits "sto**rag**e" and "leve**rag**e". Prefer multi-word phrases.
+`find_resume` matches whole words: `RAG` finds `RAG` and `hybrid RAG` but not
+`storage` or `leverage`. Punctuated terms work as written — `C++`, `.NET`,
+`CI/CD`. It uses `\W` lookarounds rather than `\b`, because `\b` asserts a word
+character on one side and so fails on exactly those terms. If a query matches
+only inside longer words, the result says so instead of reporting nothing.
 
 ### Commands
 

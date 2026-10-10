@@ -17,6 +17,9 @@ mkdir -p "$(dirname "$LOG")"
   RESUME_MCP_DATA_DIR="$CORPUS" claude -p \
     "Use the resume-curator agent to refresh my base resume. Respect the cadence gate in curator.json -- if the current base resume is still within cadence, report that and stop." \
     --allowedTools Read Write Edit Glob Grep \
+      mcp__resume__list_available_resumes \
+      mcp__resume__retrieve_resume \
+      mcp__resume__find_resume \
     --permission-mode acceptEdits
   echo
 } >> "$LOG" 2>&1

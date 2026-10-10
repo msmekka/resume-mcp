@@ -14,6 +14,46 @@ date, the next monthly trigger picks it up instead of skipping the quarter.
 
 Triggering is therefore idempotent. Running the script by hand any time is safe.
 
+## Register the MCP server at user scope
+
+The agent reads the corpus through the `resume` MCP server, and a scheduled run
+has no interactive session to fall back on. Register it in Claude Code:
+
+```bash
+claude mcp add resume --scope user -- \
+  /full/path/to/.venv/bin/resume-mcp --data-dir /full/path/to/resume-corpus
+```
+
+**`--scope user` is required here, not merely tidier.** The scheduler runs with
+your corpus as the working directory, so a `local`-scope registration — the
+default, and tied to the directory you ran `claude mcp add` in — is invisible to
+it. Avoid `--scope project` entirely: it writes a `.mcp.json` into the current
+directory, which in a clone of this repo is an untracked file carrying the
+absolute path to your corpus.
+
+The runner passes these three tools to `--allowedTools`, because a headless run
+only gets the tools it is given:
+
+```
+mcp__resume__list_available_resumes
+mcp__resume__retrieve_resume
+mcp__resume__find_resume
+```
+
+MCP tools are named `mcp__<server>__<tool>`, so renaming the server from
+`resume` to anything else means updating those three names in the runner and in
+the agent's `tools:` frontmatter.
+
+`draft_resume` is deliberately **not** in that list. It is for per-posting
+drafts from the job-search task; the curator writes a base resume with `Write`.
+
+Verify before relying on a scheduled run:
+
+```bash
+claude mcp list                                    # resume - Connected
+./refresh-base-resume.sh                           # run the real thing once
+```
+
 ## Install the agent where the scheduler can find it
 
 **Do this first.** Claude Code discovers agents from `.claude/agents/` in the

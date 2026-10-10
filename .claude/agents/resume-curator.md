@@ -1,7 +1,7 @@
 ---
 name: resume-curator
 description: Synthesizes and refreshes a general-purpose "base resume" for a target title from your resume corpus, on a cadence (default every 3 months). Also flags drift between the base resume and your tailored variants. Use for periodic resume upkeep.
-tools: Read, Write, Edit, Glob, Grep, Bash
+tools: Read, Write, Edit, Glob, Grep, Bash, mcp__resume__list_available_resumes, mcp__resume__retrieve_resume, mcp__resume__find_resume
 model: opus
 ---
 
@@ -90,9 +90,13 @@ a scheduler can fire monthly and the agent still only rebuilds quarterly.
 ## Procedure
 
 1. **Cadence gate** (above).
-2. **Read the whole corpus.** Every variant in `<corpus>/markdown-resumes/`.
-   If the `resume` MCP server is connected, `list_available_resumes` then
-   `retrieve_resume` each one; otherwise read the files directly.
+2. **Read the whole corpus.** Prefer the `resume` MCP server:
+   `list_available_resumes`, then `retrieve_resume` on each. Use it even though
+   reading `<corpus>/markdown-resumes/` directly would also work, because the
+   tools serve only what is in `config.json` — so a stray or generated file
+   sitting in that directory cannot reach you as evidence. Fall back to reading
+   the files directly only if the server is unavailable, and say so in your
+   report.
 3. **Read the brag file** if present. It is evidence, on equal footing with a
    resume that was actually sent to an employer — it exists to carry work that
    postdates every variant in the corpus. Its format: `## YYYY-MM` headings,

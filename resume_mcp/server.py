@@ -99,8 +99,11 @@ SOURCE_PREFERENCE = ['.docx', '.pdf']
 #a lowercase letter, then something that cannot sit inside a word, then a
 #lowercase letter. Deliberately excludes punctuation that legitimately appears
 #mid-word, and runs of capitals, so product names like FSxONTAP do not count.
-#also excludes Markdown emphasis, which DOCX conversion legitimately produces
-DAMAGE_RE = re.compile(r"[a-z][^a-z\sA-Z0-9.,;:()/\-'\u2019&*_\[\]]+[a-z]")
+#excludes Markdown emphasis, which DOCX conversion legitimately produces, and
+#real typography: curly quotes and en/em dashes ("Raspberry Pi\u2013based")
+DAMAGE_RE = re.compile(
+    r"[a-z][^a-z\sA-Z0-9.,;:()/\-'\u2018\u2019\u201c\u201d\u2013\u2014&*_\[\]]+[a-z]"
+)
 
 
 def normalize_extraction(text: str) -> str:

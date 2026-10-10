@@ -93,7 +93,13 @@ a scheduler can fire monthly and the agent still only rebuilds quarterly.
 2. **Read the whole corpus.** Every variant in `<corpus>/markdown-resumes/`.
    If the `resume` MCP server is connected, `list_available_resumes` then
    `retrieve_resume` each one; otherwise read the files directly.
-3. **Read the brag file** if present.
+3. **Read the brag file** if present. It is evidence, on equal footing with a
+   resume that was actually sent to an employer — it exists to carry work that
+   postdates every variant in the corpus. Its format: `## YYYY-MM` headings,
+   one past-tense accomplishment per bullet, optional scope tags (`[led]`,
+   `[built]`, `[advised]`, `[spoke]`, `[shipped]`). Entries are deliberately
+   unpolished; phrasing them is your job. An entry without a number stays
+   without a number.
 4. **Inventory the raw material.** Build a working list of every distinct
    accomplishment across all variants, with: which variants it appears in, its
    strongest phrasing, and whether it carries a metric. Tailored variants are

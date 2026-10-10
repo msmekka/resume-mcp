@@ -169,7 +169,53 @@ Optional. Lives in your data directory. Only the curator agent reads it.
 
 **Write a `brag.md`.** Without one the agent can only reorganize what your
 existing resumes already say. Anything you've done since your last tailored
-resume is invisible to it. A few bullets a month is enough.
+resume is invisible to it.
+
+### The brag file format
+
+The curator treats this file as **evidence**, on equal footing with a resume you
+actually sent an employer. So it needs dates and numbers — not polish.
+
+```markdown
+# Brag file
+
+## 2026-10
+
+- Cut deploy lead time for 40 services from 3 days to 20 minutes by replacing
+  hand-rolled CI with GitHub Actions. [led]
+- Published the model-evaluation rubric internally; 3 teams adopted it. [built]
+- Advised two enterprise customers on retrieval evaluation at their request.
+  [advised]
+
+## 2026-09
+
+- Grew the platform team from 6 to 9 engineers. [led]
+```
+
+Five rules, and they are the whole format:
+
+1. **Group under `## YYYY-MM` headings.** Month granularity is enough. The
+   curator uses dates to work out what is new since the last build.
+2. **One accomplishment per bullet, past tense, starting with a verb.** This is
+   the shape a resume bullet already has, so less gets lost in translation.
+3. **Include the number if you know it; omit it if you don't.** Never estimate.
+   The agent will not invent a metric, and it will not upgrade a vague claim
+   into a quantified one — so an unnumbered entry stays unnumbered.
+4. **Tag the scope** — `[led]`, `[built]`, `[advised]`, `[spoke]`, `[shipped]`.
+   Optional, but it tells the curator whether something supports a leadership
+   title or an IC one, which changes what leads the resume.
+5. **Don't polish.** Phrasing is the curator's job. A blunt note with a real
+   number beats a well-written sentence without one.
+
+Two things make this worth maintaining:
+
+- **It is the only input the corpus can't provide.** Everything else the curator
+  reads is a resume you already wrote, so without this file a refresh can
+  reorder your history but never extend it.
+- **The curator tells you what to add.** Its report ends with a
+  *Dropped for lack of evidence* section listing anything that appeared in the
+  last generated resume but has no backing in the corpus or the brag file.
+  Those lines are precisely the ones to write up here.
 
 ## Keeping a base resume current
 

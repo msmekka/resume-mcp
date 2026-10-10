@@ -332,39 +332,58 @@ Two details worth knowing:
 Apple Pages (`.pages`) is **not** supported — it's a zip bundle, not a document.
 Export to DOCX (see below) or PDF first.
 
-### Export to DOCX, not PDF
+### Text extraction quality
 
-**If you have a choice, put a `.docx` in `source-resumes/`, not a `.pdf`.**
-
-Apple Pages and some other PDF producers embed fonts whose glyphs carry no
-usable Unicode mapping. Text extraction then yields a substitute character
-where a real one stood — and the substitute differs per glyph and per document:
+Resumes exported from Apple Pages, and from some other producers, embed fonts
+that a PDF text extractor can mis-decode wholesale — yielding text like:
 
 ```
-Pla,orm   Na>ve   integra@on   Innova=on   producBon   execuFve   soRware
+plaGorm   automaKon   soRware   integraKon   Innova=on   execuFve   Pla,orm
 ```
 
-All of that is one defect wearing different masks. Measured on a real corpus,
-DOCX extraction of the *same document* carried roughly a tenth of the artifacts.
+The document itself is fine. It renders correctly and its text layer is
+correct; only the extractor is wrong. That distinction matters, because it is
+the *text layer* an applicant tracking system reads — so a PDF that extracts
+badly in one tool may still be perfectly readable to an employer.
 
-When both `name.docx` and `name.pdf` are present, the server converts the DOCX
-and skips the PDF. You can keep both on disk.
+This server extracts PDFs with [pypdfium2](https://github.com/pypdfium2-team/pypdfium2)
+rather than markitdown's PDF path. Measured across five Pages-exported resumes:
+**130–149 artifacts via markitdown, 17–23 via pypdfium2**, and the pypdfium2
+remainder were product names like `TypeScript` and `CloudWatch`, not damage. DOCX stays on
+markitdown, which is accurate there and adds real emphasis and links.
 
-`resume-mcp review` reports a damage count per corpus file so you can see which
-documents need a cleaner source.
+Two other repairs are applied, both deterministic:
 
-#### Why this isn't repaired automatically
+- **Ligature characters** that carry a real Unicode mapping are expanded.
+  `U+FB01` is `fi` and nothing else.
+- **`U+FFFE`**, a permanent non-character some of these PDFs carry where a
+  hyphen was broken across a line (`self<FFFE>paced`), becomes `-`. An invalid
+  code point has no valid reading to preserve.
 
-It's tempting to infer the substitution table per document and undo it. That
-was tried and removed. There is no reliable key, and a wrong guess silently
-rewrites someone's resume — in testing, inference turned an email address into
-`nametiexample.com` and `Na>ve` into `Natfve`. A resume is a factual
-claim its owner will be asked about in an interview, so quiet corruption is
-worse than visible damage.
+On a real 26-file corpus this took the artifact count from 241 to 0.
 
-What the server does instead is deterministic: expand the ligature characters
-that *do* carry a Unicode mapping (`U+FB01` is `fi` and nothing else), prefer a
-DOCX source, and report the rest rather than guessing.
+`resume-mcp review` reports a per-file count, so you can check any document you
+add.
+
+#### What is deliberately not repaired
+
+Where a *different* extractor still yields substitute characters, it is
+tempting to infer the substitution table per document and undo it. That was
+implemented and removed. There is no reliable key, and a wrong guess silently
+rewrites someone's resume — in testing, inference scored against a vocabulary
+built from the corpus itself still turned an email address into
+`nametiexample.com` and `Na>ve` into `Natfve`.
+
+A resume is a factual claim its owner will be asked about in an interview, so
+quiet corruption is worse than visible damage. The server fixes what has one
+correct answer and reports the rest.
+
+### Prefer DOCX when you have both
+
+When `name.docx` and `name.pdf` are both present, the DOCX is converted and the
+PDF skipped. This is now a question of structure rather than correctness —
+DOCX conversion preserves emphasis and links that raw PDF text extraction
+cannot. Keep both on disk; only one is converted.
 
 ## Privacy
 

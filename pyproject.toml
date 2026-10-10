@@ -22,6 +22,7 @@ dependencies = [
   "fastmcp>=2.0.0",
   "watchdog>=4.0.0",
   "markitdown[pdf,docx]>=0.1.0",
+  "pypdfium2>=4.0.0",
 ]
 
 [project.optional-dependencies]

@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 from fastmcp import FastMCP
+import pypdfium2
 from markitdown import MarkItDown
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -91,6 +92,11 @@ def load_index() -> dict:
 LIGATURES = {
     "\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl",
     "\ufb03": "ffi", "\ufb04": "ffl", "\ufb05": "ft", "\ufb06": "st",
+    #U+FFFE is a permanent non-character and never valid in text. These PDFs
+    #carry it where a hyphen was broken across a line: "self<FFFE>paced",
+    #"circuit<FFFE>switched". A plain hyphen is the only sensible reading, and
+    #leaving an invalid code point in the corpus is strictly worse.
+    "\ufffe": "-",
 }
 
 #lowest index wins when the same document is present in several formats
@@ -127,6 +133,30 @@ def extraction_damage(text: str) -> int:
     return len(DAMAGE_RE.findall(cleaned))
 
 
+def convert_document(source_path: Path) -> str:
+    """Extracts text, choosing the extractor by format.
+
+    PDFs go through pypdfium2 rather than markitdown. On this kind of document
+    -- Pages-exported PDFs with embedded fonts -- markitdown's PDF path
+    mis-decodes glyphs wholesale, yielding "plaGorm", "automaKon", "soRware",
+    while pypdfium2 reads the same files correctly. Measured across five of
+    them: 130-149 artifacts via markitdown, 17-23 via pypdfium2, and the
+    remainder are product names like TypeScript, not damage.
+
+    DOCX stays on markitdown, which is accurate there and adds useful
+    structure (real emphasis and links) that raw text extraction cannot give.
+    """
+    if source_path.suffix.lower() == ".pdf":
+        pdf = pypdfium2.PdfDocument(str(source_path))
+        try:
+            return "\n".join(
+                page.get_textpage().get_text_range() for page in pdf
+            )
+        finally:
+            pdf.close()
+    return markitdown.convert(str(source_path)).text_content
+
+
 def preferred_source(source_path: Path) -> Path:
     """The best-quality source available for this document.
 
@@ -154,13 +184,13 @@ def process_file(source_path: Path):
 
     logger.info("Compiling changes for: %s", source_path.name)
     try:
-        result = markitdown.convert(str(source_path))
+        result = convert_document(source_path)
         md_filename = f"{source_path.stem}.md"
         md_path = CORPUS_DIR / md_filename
 
         #save output, repairing ligature damage from PDF extraction
         with open(md_path, "w", encoding="utf-8") as f:
-            f.write(normalize_extraction(result.text_content))
+            f.write(normalize_extraction(result))
 
         #update config tracking
         update_config_index(source_path.stem, md_filename)

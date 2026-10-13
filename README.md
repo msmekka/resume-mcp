@@ -1,5 +1,7 @@
 # resume-mcp
 
+![resume-mcp — turn a folder of resumes into a searchable corpus your AI tools can actually reason over](docs/assets/social-preview.png)
+
 An [MCP](https://modelcontextprotocol.io) server that turns a folder of resumes
 into a searchable Markdown corpus your AI tools can actually reason over.
 

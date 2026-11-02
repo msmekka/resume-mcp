@@ -1,15 +1,23 @@
 import argparse
 import collections
+import contextlib
+import difflib
 import itertools
 import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime
 import threading
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  #Windows: the thread lock still applies
+    fcntl = None
 
 from fastmcp import FastMCP
 import pypdfium2
@@ -21,6 +29,8 @@ SUPPORTED_FILE_TYPES = ['.pdf', '.docx']
 DEFAULT_SERVER_NAME = "Resume Corpus Manager"
 CURATOR_FILE_NAME = "curator.json"
 DEFAULT_OUTPUT_DIR = "base-resumes"
+DEFAULT_PDF_SUBDIR = "pdf"
+HISTORY_DIR_NAME = "corpus-history"
 
 logger = logging.getLogger(__name__)
 
@@ -58,16 +68,72 @@ def configure(data_dir: Path, create: bool = True):
     return DATA_DIR
 
 
-def load_index() -> dict:
-    """Reads the name -> markdown-filename index, tolerating a missing or torn file."""
+class IndexUnreadableError(Exception):
+    """The index exists but cannot be parsed, so it must not be overwritten."""
+
+
+def load_index(strict: bool = False) -> dict:
+    """Reads the name -> markdown-filename index.
+
+    Readers get {} for a missing or unreadable file. Writers pass strict=True:
+    treating an unreadable index as empty and then saving would replace the
+    whole corpus with one entry, which is exactly how an index gets wiped.
+    """
     if CONFIG_FILE is None or not CONFIG_FILE.exists():
         return {}
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        if strict:
+            raise IndexUnreadableError(f"{CONFIG_FILE} is not valid JSON") from e
         logger.warning("Index at %s is not valid JSON; treating it as empty", CONFIG_FILE)
         return {}
+
+
+#Watchdog timers run on separate threads, and Claude Desktop and Claude Code
+#may each run their own server process against the same data dir, so updates
+#need both a thread lock and a file lock.
+_index_thread_lock = threading.RLock()
+
+
+@contextlib.contextmanager
+def index_lock():
+    """Serializes read-modify-write of the index across threads and processes."""
+    with _index_thread_lock:
+        lock_path = CONFIG_FILE.with_name(CONFIG_FILE.name + ".lock")
+        with open(lock_path, "a") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def save_index(data: dict):
+    """Writes the index atomically, so a reader never sees a half-written file."""
+    tmp = CONFIG_FILE.with_name(f".{CONFIG_FILE.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CONFIG_FILE)
+
+
+def modify_index(change) -> bool:
+    """Applies change(data) to the index under lock. Returns False if refused."""
+    with index_lock():
+        try:
+            data = load_index(strict=True)
+        except IndexUnreadableError:
+            logger.error("Index at %s is unreadable; leaving it untouched. "
+                         "Fix or delete it, then restart the server.", CONFIG_FILE)
+            return False
+        if change(data) is not False:
+            save_index(data)
+        return True
 
 
 
@@ -193,17 +259,14 @@ def process_file(source_path: Path):
             f.write(normalize_extraction(result))
 
         #update config tracking
-        update_config_index(source_path.stem, md_filename)
-        logger.info("Successfully written to corpus: %s", md_filename)
+        if update_config_index(source_path.stem, md_filename):
+            logger.info("Successfully written to corpus: %s", md_filename)
     except Exception:
         logger.exception("Error processing %s", source_path.name)
 
 
-def update_config_index(key: str, filename: str):
-    data = load_index()
-    data[key] = filename
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+def update_config_index(key: str, filename: str) -> bool:
+    return modify_index(lambda data: data.__setitem__(key, filename))
 
 
 def remove_from_corpus(source_path: Path):
@@ -212,11 +275,12 @@ def remove_from_corpus(source_path: Path):
     if md_path.exists():
         md_path.unlink()
 
-    data = load_index()
-    if source_path.stem in data:
+    def drop(data):
+        if source_path.stem not in data:
+            return False
         del data[source_path.stem]
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
+
+    modify_index(drop)
     logger.info("Removed %s from active corpus", source_path.stem)
 
 
@@ -304,7 +368,9 @@ def reconcile_corpus():
     clobbering hand-edits made directly to the corpus.
     """
     stale = []
+    unindexed = []
     seen = set()
+    index = load_index()
     for file in sorted(SOURCE_DIR.iterdir()):
         if not file.is_file() or file.suffix.lower() not in SUPPORTED_FILE_TYPES:
             continue
@@ -315,6 +381,19 @@ def reconcile_corpus():
         md_path = CORPUS_DIR / f"{best.stem}.md"
         if not md_path.exists() or best.stat().st_mtime > md_path.stat().st_mtime:
             stale.append(best)
+        elif best.stem not in index:
+            #converted earlier but dropped from the index; without this, an
+            #index that lost entries would never recover them
+            unindexed.append(best.stem)
+
+    if unindexed:
+        def restore(data):
+            for stem in unindexed:
+                data.setdefault(stem, f"{stem}.md")
+
+        if modify_index(restore):
+            logger.info("Startup reconcile: re-indexed %d resume(s) missing from %s",
+                        len(unindexed), CONFIG_FILE.name)
 
     if not stale:
         logger.info("Corpus is already up to date with %s", SOURCE_DIR.name)
@@ -489,15 +568,12 @@ def draft_resume(company: str, role: str, markdown: str, job_url: str = "") -> s
                       encoding="utf-8")
 
     return (f"Draft saved to {target}\n"
-            f"It is NOT in the corpus. After reading it, a person can promote it with:\n"
+            f"It is NOT in the corpus. A person can preview it as a PDF, then promote it:\n"
+            f"  resume-mcp render {target.stem} --data-dir {DATA_DIR}\n"
             f"  resume-mcp promote {target.stem} --data-dir {DATA_DIR}")
 
 
-#--------PROMOTION GATE-------------
-#Generated base resumes land outside the corpus. They can be promoted into it,
-#but only by a person at a terminal: a resume written by a model should not
-#become evidence for the next one without someone having read it first.
-
+#--------CURATOR CONFIG-------------
 def load_curator_config() -> dict:
     """Reads curator.json for the generated-output location. Defaults if absent."""
     defaults = {"output_dir": DEFAULT_OUTPUT_DIR, "output_name": "base-resume"}
@@ -520,7 +596,7 @@ def resolve_output_dir(config: dict | None = None) -> Path:
 
 
 def list_generated() -> list[Path]:
-    """Generated base resumes awaiting a decision, newest first."""
+    """Generated drafts awaiting a decision, newest first."""
     output_dir = resolve_output_dir()
     if not output_dir.is_dir():
         return []
@@ -528,45 +604,280 @@ def list_generated() -> list[Path]:
     return sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)
 
 
-def promote_generated(source: Path, corpus_name: str) -> str:
-    """Copies a generated resume into the corpus and indexes it.
+def _resolve_configured(raw) -> Path:
+    path = Path(str(raw)).expanduser()
+    return path if path.is_absolute() else (DATA_DIR / path).resolve()
 
-    Callers are responsible for obtaining human approval first; this function
-    performs no checks of its own beyond refusing to shadow a tracked source.
+
+def resolve_pdf_dir(config: dict | None = None) -> Path:
+    """Where PDFs go: curator.json's pdf_dir, else <output_dir>/pdf.
+
+    Kept apart from the Markdown drafts so each folder holds one kind of file.
     """
-    if (CORPUS_DIR / f"{corpus_name}.md").exists():
-        return f"Refused: '{corpus_name}' already exists in the corpus."
+    config = config if config is not None else load_curator_config()
+    if config.get("pdf_dir"):
+        return _resolve_configured(config["pdf_dir"])
+    return resolve_output_dir(config) / DEFAULT_PDF_SUBDIR
 
+
+def resolve_style_dir(config: dict | None = None) -> Path:
+    """Where resume.lua and resume.css live: curator.json's style_dir, else <data>/styles."""
+    config = config if config is not None else load_curator_config()
+    return _resolve_configured(config.get("style_dir") or "styles")
+
+
+#--------PROVENANCE-------------
+#A promoted copy starts with one comment naming the draft it came from, so
+#'redo' knows where to look and 'review' can tell when a draft has been edited
+#since. Pandoc drops HTML comments, so it never shows up in a PDF.
+PROVENANCE_RE = re.compile(r"\A<!-- Promoted: (\S+) \| From: (.+?) -->\n")
+
+
+def split_provenance(text: str) -> tuple[dict | None, str]:
+    """Separates a corpus copy's provenance line from the resume itself."""
+    m = PROVENANCE_RE.match(text)
+    if not m:
+        return None, text
+    return {"date": m.group(1), "source": Path(m.group(2))}, text[m.end():]
+
+
+def with_provenance(text: str, source: Path) -> str:
+    _, body = split_provenance(text)  #never stack two provenance lines
+    return f"<!-- Promoted: {date.today().isoformat()} | From: {source.resolve()} -->\n{body}"
+
+
+def promoted_sources() -> dict[Path, str]:
+    """Maps each draft path to the corpus name it was promoted as."""
+    found = {}
+    for name, filename in load_index().items():
+        path = CORPUS_DIR / filename
+        if not path.is_file():
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            meta, _ = split_provenance(f.readline())
+        if meta:
+            found[meta["source"]] = name
+    return found
+
+
+#--------NAME MATCHING-------------
+def _tokens(query: str) -> list[str]:
+    return [t for t in re.split(r"[-_\s]+", query.casefold()) if t]
+
+
+def _token_match(query: str, candidates: list[str]) -> list[str]:
+    """Exact match wins; otherwise every word of the query must appear.
+
+    So 'acme staff' finds '2026-11-02-acme-staff-platform-engineer'.
+    """
+    if query in candidates:
+        return [query]
+    tokens = _tokens(query)
+    if not tokens:
+        return []
+    return [c for c in candidates if all(t in c.casefold() for t in tokens)]
+
+
+def match_drafts(query: str) -> list[Path]:
+    path = Path(query).expanduser()
+    if path.is_file():
+        return [path.resolve()]
+    drafts = list_generated()
+    by_stem = collections.defaultdict(list)
+    for d in drafts:
+        by_stem[d.stem].append(d)
+    stems = _token_match(Path(query).stem if query.endswith(".md") else query, list(by_stem))
+    return [d for s in stems for d in by_stem[s]]
+
+
+def match_corpus(query: str) -> list[str]:
+    return _token_match(query, list(load_index()))
+
+
+def _report_matches(kind: str, query: str, matches: list) -> bool:
+    """Prints a not-found or ambiguous message. True when exactly one matched."""
+    if len(matches) == 1:
+        return True
+    if not matches:
+        print(f"No {kind} matches '{query}'.", file=sys.stderr)
+        print(f"Run 'resume-mcp review --data-dir {DATA_DIR}' to see what is available.",
+              file=sys.stderr)
+    else:
+        print(f"'{query}' matches {len(matches)} {kind}s. Be more specific:", file=sys.stderr)
+        for m in matches:
+            print(f"  {m}", file=sys.stderr)
+    return False
+
+
+#--------PDF RENDERING-------------
+class RenderError(Exception):
+    pass
+
+
+def render_pdf(markdown_path: Path, pdf_name: str) -> Path:
+    """Renders Markdown to a styled PDF in the PDF folder with pandoc + weasyprint."""
+    pandoc = shutil.which("pandoc")
+    if not pandoc:
+        raise RenderError("pandoc is not installed (brew install pandoc)")
+    if not shutil.which("weasyprint"):
+        raise RenderError("weasyprint is not installed (brew install weasyprint)")
+
+    #resume.css is required; resume.lua is optional. A filter lets a style
+    #rebuild structure (headings, role lines) that plain Markdown lacks, but a
+    #stylesheet alone is enough to style pandoc's default HTML.
+    style_dir = resolve_style_dir()
+    lua, css = style_dir / "resume.lua", style_dir / "resume.css"
+    if not css.is_file():
+        raise RenderError(f"resume.css not found in {style_dir}. Set style_dir in "
+                          f"{CURATOR_FILE_NAME}; see 'Styling PDFs' in the README.")
+
+    pdf_dir = resolve_pdf_dir()
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    out = pdf_dir / f"{pdf_name}.pdf"
+    #plain-style drafts put "- " bullets directly under a role line
+    command = [pandoc, "-f", "markdown+lists_without_preceding_blankline",
+               str(markdown_path), "-o", str(out),
+               "--pdf-engine=weasyprint", f"--css={css}"]
+    if lua.is_file():
+        command.append(f"--lua-filter={lua}")
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RenderError(result.stderr.strip()[-800:] or "pandoc failed")
+    return out
+
+
+def _render_and_report(markdown_path: Path, pdf_name: str) -> bool:
+    try:
+        out = render_pdf(markdown_path, pdf_name)
+    except RenderError as e:
+        print(f"PDF not created: {e}", file=sys.stderr)
+        print(f"Retry with:  resume-mcp render {pdf_name} --data-dir {DATA_DIR}",
+              file=sys.stderr)
+        return False
+    print(f"PDF: {out}")
+    return True
+
+
+#--------PROMOTION GATE-------------
+#Generated drafts land outside the corpus. They can be promoted into it, or
+#replace an earlier promotion, but only by a person at a terminal: a resume
+#written by a model should not become evidence for the next one without
+#someone having read it first.
+
+def _write_atomic(path: Path, text: str):
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def corpus_name_problem(corpus_name: str) -> str | None:
+    """Why a new corpus name cannot be used, or None if it can."""
+    if not corpus_name or "/" in corpus_name or corpus_name.startswith("."):
+        return f"'{corpus_name}' is not a usable file name."
+    if (CORPUS_DIR / f"{corpus_name}.md").exists() or corpus_name in load_index():
+        return (f"'{corpus_name}' is already in the corpus. To replace it, run:\n"
+                f"  resume-mcp redo {corpus_name}")
     #a source binary with this stem would have its markdown regenerated on the
     #next reconcile, silently discarding whatever was promoted here
     for suffix in SUPPORTED_FILE_TYPES:
         if (SOURCE_DIR / f"{corpus_name}{suffix}").exists():
-            return (f"Refused: source-resumes/{corpus_name}{suffix} exists, and "
-                    f"reconcile would overwrite the promoted copy. Pick another name.")
+            return (f"source-resumes/{corpus_name}{suffix} exists, and reconcile would "
+                    f"overwrite the promoted copy. Pick another name.")
+    return None
 
-    shutil.copy2(source, CORPUS_DIR / f"{corpus_name}.md")
-    update_config_index(corpus_name, f"{corpus_name}.md")
+
+def promote_generated(source: Path, corpus_name: str) -> str:
+    """Copies a generated resume into the corpus and indexes it.
+
+    Callers are responsible for obtaining human approval first.
+    """
+    problem = corpus_name_problem(corpus_name)
+    if problem:
+        return f"Refused: {problem}"
+
+    target = CORPUS_DIR / f"{corpus_name}.md"
+    _write_atomic(target, with_provenance(source.read_text(encoding="utf-8"), source))
+    if not update_config_index(corpus_name, target.name):
+        target.unlink()  #undo the copy so promoting again is not refused
+        return (f"Not promoted: {CONFIG_FILE.name} is unreadable. "
+                f"Fix it, then promote again.")
     return f"Promoted '{corpus_name}' into the corpus."
 
 
+def redo_problem(corpus_name: str) -> str | None:
+    """Why a corpus entry cannot be replaced by a draft, or None if it can."""
+    if corpus_name not in load_index():
+        return f"'{corpus_name}' is not in the corpus. Use 'resume-mcp promote' instead."
+    for suffix in SUPPORTED_FILE_TYPES:
+        if (SOURCE_DIR / f"{corpus_name}{suffix}").exists():
+            return (f"'{corpus_name}' is converted from source-resumes/{corpus_name}{suffix}. "
+                    f"Update that file instead; the server reconverts it.")
+    return None
+
+
+def redo_promoted(corpus_name: str, source: Path) -> str:
+    """Replaces a promoted corpus copy with a newer draft, keeping the old one.
+
+    Callers are responsible for obtaining human approval first.
+    """
+    problem = redo_problem(corpus_name)
+    if problem:
+        return f"Refused: {problem}"
+
+    target = CORPUS_DIR / load_index()[corpus_name]
+    if target.is_file():
+        #outside markdown-resumes/, so old versions are never indexed or searched
+        history = DATA_DIR / HISTORY_DIR_NAME
+        history.mkdir(exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        shutil.copy2(target, history / f"{stamp}-{target.name}")
+
+    _write_atomic(target, with_provenance(source.read_text(encoding="utf-8"), source))
+    return f"Replaced '{corpus_name}' in the corpus. The previous version is in {HISTORY_DIR_NAME}/."
+
+
+def _require_terminal(action: str) -> bool:
+    #the gate. a cron job, a headless agent, or a piped script has no person in
+    #it, and this step exists precisely to require one.
+    if sys.stdin.isatty():
+        return True
+    print(f"Refused: {action} requires an interactive terminal.", file=sys.stderr)
+    print("A generated resume should be read by a person before it becomes "
+          "evidence for the next one.", file=sys.stderr)
+    return False
+
+
 def cmd_review(args) -> int:
-    """Shows generated base resumes and whether each is in the corpus yet."""
+    """Shows generated drafts and whether each is in the corpus yet."""
     configure(resolve_data_dir(args.data_dir), create=False)
+    output_dir = resolve_output_dir()
     generated = list_generated()
     if not generated:
-        print(f"No generated resumes in {resolve_output_dir()}")
+        print(f"No generated resumes in {output_dir}")
         return 0
 
     index = load_index()
-    promoted = set(index.values())
-    print(f"Generated resumes in {resolve_output_dir()}:\n")
-    output_dir = resolve_output_dir()
+    sources = promoted_sources()
+    print(f"Generated resumes in {output_dir}:\n")
     for f in generated:
-        state = "in corpus" if f.name in promoted else "not in corpus"
         modified = date.fromtimestamp(f.stat().st_mtime).isoformat()
+        corpus_name = sources.get(f.resolve())
+        if corpus_name:
+            _, body = split_provenance((CORPUS_DIR / index[corpus_name]).read_text(encoding="utf-8"))
+            if body == f.read_text(encoding="utf-8"):
+                state = f"in corpus as {corpus_name}"
+            else:
+                state = (f"in corpus as {corpus_name}, but the draft has changed since. "
+                         f"Update with: resume-mcp redo {corpus_name}")
+        elif f.name in index.values():
+            state = "in corpus"
+        else:
+            state = "not in corpus"
         print(f"  {f.relative_to(output_dir)}")
-        print(f"    {state}, modified {modified}")
-    print("\nPromote one with:  resume-mcp promote <name>")
+        print(f"    {state} (modified {modified})")
+    print(f"\nPDFs go to {resolve_pdf_dir()}")
+    print("Preview:  resume-mcp render <draft>")
+    print("Promote:  resume-mcp promote <draft>      Replace:  resume-mcp redo <corpus name>")
     print("Promotion is interactive by design -- a person reads it first.")
     return 0
 
@@ -575,49 +886,142 @@ def cmd_promote(args) -> int:
     """Human-in-the-loop promotion of one generated resume into the corpus."""
     configure(resolve_data_dir(args.data_dir), create=False)
 
-    candidate = Path(args.name).expanduser()
-    if not candidate.is_file():
-        stem = Path(args.name).stem
-        matches = [f for f in list_generated() if f.stem == stem]
-        if len(matches) > 1:
-            print(f"Ambiguous: {len(matches)} drafts named '{stem}'. Pass a full path:",
-                  file=sys.stderr)
-            for m in matches:
-                print(f"  {m}", file=sys.stderr)
-            return 1
-        candidate = matches[0] if matches else resolve_output_dir() / f"{stem}.md"
-    if not candidate.is_file():
-        print(f"Not found: {candidate}", file=sys.stderr)
-        print(f"Run 'resume-mcp review --data-dir {DATA_DIR}' to see what is available.",
-              file=sys.stderr)
+    matches = match_drafts(args.name)
+    if not _report_matches("draft", args.name, matches):
         return 1
+    candidate = matches[0]
 
-    #the gate. a cron job, a headless agent, or a piped script has no person in
-    #it, and this step exists precisely to require one.
-    if not sys.stdin.isatty():
-        print("Refused: promotion requires an interactive terminal.", file=sys.stderr)
-        print("A generated resume should be read by a person before it becomes "
-              "evidence for the next one.", file=sys.stderr)
+    if args.as_name:
+        problem = corpus_name_problem(args.as_name)
+        if problem:
+            print(f"Refused: {problem}", file=sys.stderr)
+            return 1
+
+    if not _require_terminal("promotion"):
         return 2
 
-    text = candidate.read_text(encoding="utf-8")
-    corpus_name = args.as_name or candidate.stem
+    print("=" * 72)
+    print(candidate.read_text(encoding="utf-8"))
+    print("=" * 72)
+    print(f"\nSource: {candidate}")
 
-    print("=" * 72)
-    print(text)
-    print("=" * 72)
-    print(f"\nSource:       {candidate}")
-    print(f"Promote into: {CORPUS_DIR}/{corpus_name}.md")
-    print("\nOnce promoted this becomes corpus evidence: searchable, retrievable,")
+    corpus_name = args.as_name
+    while not corpus_name:
+        entered = input(f"\nCorpus name [{candidate.stem}]: ").strip() or candidate.stem
+        problem = corpus_name_problem(entered)
+        if problem:
+            print(problem)
+        else:
+            corpus_name = entered
+
+    print(f"\nPromote into: {CORPUS_DIR}/{corpus_name}.md")
+    print("Once promoted this becomes corpus evidence: searchable, retrievable,")
     print("and available as source material the next time a resume is generated.")
-
     answer = input(f"\nPromote '{corpus_name}' into the corpus? [y/N] ").strip().lower()
     if answer not in ("y", "yes"):
         print("Not promoted.")
         return 0
 
-    print(promote_generated(candidate, corpus_name))
+    result = promote_generated(candidate, corpus_name)
+    print(result)
+    if not result.startswith("Promoted"):
+        return 1
+    if not args.no_pdf:
+        _render_and_report(CORPUS_DIR / f"{corpus_name}.md", corpus_name)
     return 0
+
+
+def cmd_redo(args) -> int:
+    """Human-in-the-loop replacement of a promoted resume with a revised draft."""
+    configure(resolve_data_dir(args.data_dir), create=False)
+
+    matches = match_corpus(args.name)
+    if not _report_matches("corpus resume", args.name, matches):
+        return 1
+    corpus_name = matches[0]
+    problem = redo_problem(corpus_name)
+    if problem:
+        print(f"Refused: {problem}", file=sys.stderr)
+        return 1
+
+    target = CORPUS_DIR / load_index()[corpus_name]
+    current = target.read_text(encoding="utf-8") if target.is_file() else ""
+    meta, current_body = split_provenance(current)
+
+    if args.draft:
+        drafts = match_drafts(args.draft)
+        if not _report_matches("draft", args.draft, drafts):
+            return 1
+        draft = drafts[0]
+    elif meta and meta["source"].is_file():
+        draft = meta["source"]
+    else:
+        where = f" ({meta['source']} no longer exists)" if meta else ""
+        print(f"Don't know which draft to use for '{corpus_name}'{where}. Name it:",
+              file=sys.stderr)
+        print(f"  resume-mcp redo {corpus_name} --with <draft>", file=sys.stderr)
+        return 1
+
+    new_text = draft.read_text(encoding="utf-8")
+    if new_text == current_body:
+        print(f"'{corpus_name}' already matches {draft.name}; the corpus is unchanged.")
+        if not args.no_pdf:
+            _render_and_report(target, corpus_name)
+        return 0
+
+    if not _require_terminal("redo"):
+        return 2
+
+    diff = difflib.unified_diff(
+        current_body.splitlines(), new_text.splitlines(),
+        fromfile=f"corpus: {corpus_name}", tofile=f"draft: {draft.name}", lineterm="",
+    )
+    print("=" * 72)
+    print("\n".join(diff))
+    print("=" * 72)
+    print(f"\nReplace: {target}")
+    print(f"With:    {draft}")
+    print(f"The current version is kept in {DATA_DIR / HISTORY_DIR_NAME}/.")
+    answer = input(f"\nReplace '{corpus_name}' with this draft? [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("Not replaced.")
+        return 0
+
+    result = redo_promoted(corpus_name, draft)
+    print(result)
+    if not result.startswith("Replaced"):
+        return 1
+    if not args.no_pdf:
+        _render_and_report(target, corpus_name)
+    return 0
+
+
+def cmd_render(args) -> int:
+    """Renders a promoted resume or a draft to a styled PDF. Changes no corpus files."""
+    configure(resolve_data_dir(args.data_dir), create=False)
+    index = load_index()
+
+    #a promoted resume renders from its corpus copy, so the PDF always matches
+    #what was approved; a draft renders as a preview before promotion
+    #one matching promoted resume wins; add words to reach a draft instead
+    #("acme staff" -> the promoted copy, "acme staff v2" -> the v2 draft)
+    corpus = match_corpus(args.name)
+    drafts = match_drafts(args.name)
+    exact_draft = [d for d in drafts if d.stem == Path(args.name).stem
+                   or d == Path(args.name).expanduser().resolve()]
+    if exact_draft:
+        corpus, drafts = [], exact_draft
+    elif corpus:
+        drafts = []
+
+    choices = [f"corpus: {c}" for c in corpus] + [f"draft:  {d}" for d in drafts]
+    if not _report_matches("resume", args.name, choices):
+        return 1
+    if corpus:
+        ok = _render_and_report(CORPUS_DIR / index[corpus[0]], corpus[0])
+    else:
+        ok = _render_and_report(drafts[0], drafts[0].stem)
+    return 0 if ok else 1
 
 
 #--------INITIALIZATION CONTROLLER-------------
@@ -678,21 +1082,36 @@ def run_subcommand(name: str, argv: list[str]) -> int:
     parser.add_argument("--data-dir", help="Corpus location. Defaults to "
                                            "$RESUME_MCP_DATA_DIR, then the working directory.")
     if name == "promote":
-        parser.add_argument("name", help="Generated resume to promote: a name or a path.")
+        parser.add_argument("name", nargs="+", help="Draft to promote: a path, a name, or "
+                                                    "words from its name (acme staff v2).")
         parser.add_argument("--as", dest="as_name",
-                            help="Corpus name to promote it under. Defaults to the filename stem.")
+                            help="Corpus name to promote it under. Asked for if omitted.")
+    if name == "redo":
+        parser.add_argument("name", nargs="+", help="Promoted resume to replace: its corpus "
+                                                    "name, or words from it.")
+        parser.add_argument("--with", dest="draft", nargs="+",
+                            help="Revised draft to replace it with. Defaults to the draft "
+                                 "it was promoted from.")
+    if name == "render":
+        parser.add_argument("name", nargs="+", help="Corpus resume or draft to render.")
+    if name in ("promote", "redo"):
+        parser.add_argument("--no-pdf", action="store_true", help="Skip making the PDF.")
     if name == "normalize":
         parser.add_argument("--apply", action="store_true",
                             help="Rewrite the damaged files. Without this, only reports.")
     args = parser.parse_args(argv)
+    for field in ("name", "draft"):
+        if isinstance(getattr(args, field, None), list):
+            setattr(args, field, " ".join(getattr(args, field)))
 
     logging.basicConfig(level=logging.WARNING,
                         format="%(levelname)s %(name)s: %(message)s")
-    handlers = {"promote": cmd_promote, "review": cmd_review, "normalize": cmd_normalize}
+    handlers = {"promote": cmd_promote, "review": cmd_review, "normalize": cmd_normalize,
+                "redo": cmd_redo, "render": cmd_render}
     return handlers[name](args)
 
 
-SUBCOMMANDS = ("review", "promote", "normalize")
+SUBCOMMANDS = ("review", "promote", "redo", "render", "normalize")
 
 
 def main():
@@ -704,7 +1123,7 @@ def main():
     parser = argparse.ArgumentParser(
         prog="resume-mcp",
         description="MCP server that keeps a searchable Markdown corpus of your resumes. "
-                    "Subcommands: review, promote.",
+                    "Subcommands: review, promote, redo, render, normalize.",
     )
     parser.add_argument(
         "--data-dir",

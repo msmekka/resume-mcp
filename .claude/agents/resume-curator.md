@@ -66,9 +66,11 @@ A generated base resume *can* become corpus evidence — but only after a person
 has read it. That is what `resume-mcp promote` is for, and it refuses to run
 without an interactive terminal.
 
-**Never run `resume-mcp promote`.** Do not pipe input to it, do not work around
-the terminal check, and do not copy a file into `markdown-resumes/` or add an
-entry to `config.json` by hand to achieve the same effect. Your job ends at
+**Never run `resume-mcp promote` or `resume-mcp redo`.** `redo` replaces a
+promoted resume and has the same gate. Do not pipe input to either, do not work
+around the terminal check, and do not copy a file into `markdown-resumes/`,
+overwrite one there, or add an entry to `config.json` by hand to achieve the
+same effect. `resume-mcp render` only makes a PDF and is fine to suggest. Your job ends at
 writing the file and telling the person the command.
 
 ## Cadence gate

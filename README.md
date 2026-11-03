@@ -289,9 +289,111 @@ editing `config.json` or copying into `markdown-resumes/` by hand.
 
 It also refuses two unsafe names:
 
-- one already in the corpus, and
+- one already in the corpus (use `redo` instead), and
 - one matching a file in `source-resumes/` — the next reconcile would regenerate
   that Markdown from the binary and silently discard the promoted copy.
+
+You can name a draft by a few words from its filename — `resume-mcp promote
+acme staff v2` — and if you leave out `--as`, `promote` asks for the corpus
+name. The promoted copy starts with a comment recording which draft it came
+from; pandoc drops it, so it never appears in a PDF.
+
+### Replacing a promoted resume: `redo`
+
+Edited a draft after promoting it, or wrote a v2?
+
+```bash
+resume-mcp redo acme staff                 # re-promote from the same draft
+resume-mcp redo acme staff --with staff v2 # or from a different one
+```
+
+`redo` shows a diff between the corpus copy and the draft, asks for
+confirmation, moves the old version to `corpus-history/` (outside the corpus,
+so it is never searched), and writes the new one under the same name. It has
+the same interactive-terminal gate as `promote`, and refuses resumes that are
+converted from `source-resumes/` — update the source file for those.
+`resume-mcp review` flags drafts that changed after promotion.
+
+### PDFs
+
+`promote` and `redo` render a styled PDF of the corpus copy (skip with
+`--no-pdf`), and `resume-mcp render <name>` renders one on demand: a promoted
+resume by its corpus name, or a draft by its filename as a preview. When a
+name matches both, the promoted copy wins; add words to reach a draft.
+
+PDFs go to their own folder, never next to the drafts or into the corpus. Both
+locations are set in `curator.json`:
+
+```json
+{
+  "pdf_dir": "base-resumes/pdf",
+  "style_dir": "styles"
+}
+```
+
+`pdf_dir` defaults to `<output_dir>/pdf`; `style_dir` to `styles/` in the data
+directory. Relative paths resolve against the data directory.
+
+### Styling PDFs
+
+The look of a PDF is yours to define; no style ships with this repo, and
+`styles/` is gitignored so your styling stays out of it. Rendering needs pandoc
+and weasyprint (`brew install pandoc weasyprint`) and a `style_dir` holding:
+
+| File | Required | Purpose |
+|---|---|---|
+| `resume.css` | yes | Styles the page. weasyprint supports `@page` for size and margins. |
+| `resume.lua` | no | A [pandoc Lua filter](https://pandoc.org/lua-filters.html) that adds structure before styling. |
+
+`render` runs, in effect:
+
+```bash
+pandoc -f markdown+lists_without_preceding_blankline draft.md -o out.pdf \
+  --pdf-engine=weasyprint --css=resume.css [--lua-filter=resume.lua]
+```
+
+**CSS only.** Without a filter, pandoc turns the Markdown into plain HTML:
+`**bold**` lines become `<p><strong>…</strong></p>`, `*` and `-` lines become
+`<ul>`, and Markdown headings (`##`) become `<h2>`. If your drafts use real
+Markdown headings, a stylesheet is all you need. Start with:
+
+```css
+@page { size: Letter; margin: 0.6in; }
+html { font-family: Helvetica, Arial, sans-serif; font-size: 10pt; line-height: 1.3; }
+h1 { font-size: 20pt; margin: 0; }
+h2 { font-size: 10pt; text-transform: uppercase; border-bottom: 1px solid #ccc; }
+ul { padding-left: 14pt; }
+li { break-inside: avoid; }
+a { color: inherit; text-decoration: none; }
+header#title-block-header { display: none; }
+```
+
+**With a filter.** Drafts usually mark structure with bold paragraphs or
+all-caps lines rather than Markdown headings, so plain CSS cannot tell a section
+title from an employer name. A filter can rebuild that structure. A useful
+convention to target in your CSS:
+
+| Draft text | Suggested output |
+|---|---|
+| First paragraph (the name) | `<h1>` |
+| Second and third paragraphs | `<div class="tagline">`, `<div class="contact">` |
+| A standalone bold line, or a short ALL-CAPS line | `<h2>` |
+| A title followed by dates (`**Director** 2020 – 2024`) | `<div class="role"><p><strong>Director</strong><span class="dates">2020 – 2024</span></p></div>` |
+
+With that in place, `.role p { display: flex; justify-content: space-between; }`
+right-aligns the dates. Match dates strictly (a year, optionally after a month
+name, or Present/Current/Ongoing): a loose match turns skill labels like
+`**Cloud:** AWS, GCP` into role lines, which then overflow the page.
+
+**Testing a style.** Render a draft as a preview, open the PDF, and adjust:
+
+```bash
+resume-mcp render <draft words>
+```
+
+If `styles/resume.lua` exists in a clone of this repo,
+`tests/test_local_style.py` checks it against that convention; the tests skip
+otherwise.
 
 ## Drafting a resume for one job posting
 
@@ -342,8 +444,11 @@ What you run in a terminal. All accept `--data-dir`.
 | Command | What it does |
 |---|---|
 | `resume-mcp` | Runs the MCP server. This is what your AI client invokes. |
-| `resume-mcp review` | Lists generated base resumes and whether each is in the corpus. Read-only. |
-| `resume-mcp promote <name>` | Shows a generated resume and, on your confirmation, adds it to the corpus. Interactive only. |
+| `resume-mcp review` | Lists generated drafts, whether each is in the corpus, and which changed since promotion. Read-only. |
+| `resume-mcp promote <draft> [--as NAME]` | Shows a draft and, on your confirmation, adds it to the corpus and renders its PDF. Interactive only. |
+| `resume-mcp redo <name> [--with <draft>]` | Shows a diff and, on your confirmation, replaces a promoted resume with a revised draft, keeping the old one in `corpus-history/`. Interactive only. |
+| `resume-mcp render <name>` | Renders a promoted resume or a draft to a styled PDF in `pdf_dir`. Changes nothing in the corpus. |
+| `resume-mcp normalize [--apply]` | Reports, or repairs, PDF-extraction damage in the corpus. |
 
 ## How it works
 

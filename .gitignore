@@ -9,6 +9,7 @@
 /base-resumes/
 /generated/
 /logs/
+/styles/
 
 # Never commit resume binaries from anywhere in the tree.
 *.pdf
